@@ -1054,7 +1054,7 @@ export class KokoPack implements Observable {
       if (!bytes) {
         if (codec === 'opus') {
           if (!encoder!.opus) return new KokoErrors([diag('KF002', { level: 'error', params: { capability: 'encoder.opus' } })]);
-          bytes = await encoder!.opus(pcm, { bitrateKbps: 40, channels: 1 });
+          bytes = await encoder!.opus(pcm, { sampleRate: sr, bitrateKbps: 40, channels: 1 });
           const pr = probeAudio(bytes, 'opus');
           params = { codec: 'opus', sampleRate: 48000, channels: 1, bitrateMode: 'vbr', spliceable: false, encoderDelay: pr?.encoderDelay ?? 312, padding: 0, offset, duration: Math.round(totalMs) };
         } else {

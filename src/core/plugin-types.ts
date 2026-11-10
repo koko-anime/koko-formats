@@ -153,6 +153,8 @@ export interface Mp3EncodeOptions {
 
 /** Ustawienia kodowania Opus (Ogg, RFC 7845). */
 export interface OpusEncodeOptions {
+  /** Częstotliwość próbkowania wejściowego PCM (plugin przelicza na 48 kHz). */
+  sampleRate: number;
   /** Bitrate w kbit/s (zalecane 32–48 mono). */
   bitrateKbps: number;
   /** Liczba kanałów. */
