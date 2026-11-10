@@ -1,0 +1,79 @@
+{
+  "name": "@koko-anime/formats",
+  "version": "0.3.0",
+  "description": "Koko-ASS, Koko-Lexicon i Koko-Pack: parsowanie, edycja i zapis (Koko-Anime)",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./config": {
+      "types": "./dist/config.d.ts",
+      "import": "./dist/config.js"
+    },
+    "./plugin": {
+      "types": "./dist/plugin.d.ts",
+      "import": "./dist/plugin.js"
+    },
+    "./ass": {
+      "types": "./dist/ass.d.ts",
+      "import": "./dist/ass.js"
+    },
+    "./lexicon": {
+      "types": "./dist/lexicon.d.ts",
+      "import": "./dist/lexicon.js"
+    },
+    "./numbers": {
+      "types": "./dist/numbers.d.ts",
+      "import": "./dist/numbers.js"
+    },
+    "./pack": {
+      "types": "./dist/pack.d.ts",
+      "import": "./dist/pack.js"
+    },
+    "./timing": {
+      "types": "./dist/timing.d.ts",
+      "import": "./dist/timing.js"
+    },
+    "./mp3": {
+      "types": "./dist/mp3.d.ts",
+      "import": "./dist/mp3.js"
+    },
+    "./crypto-noble": {
+      "types": "./dist/crypto-noble.d.ts",
+      "import": "./dist/crypto-noble.js"
+    }
+  },
+  "scripts": {
+    "build": "tsdown",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit -p .",
+    "docs": "typedoc",
+    "docs:check": "typedoc --emit none --treatValidationWarningsAsErrors",
+    "prepublishOnly": "bun run typecheck && bun test && bun run build"
+  },
+  "dependencies": {
+    "@noble/ed25519": "^3.2.0",
+    "@noble/hashes": "^2.4.0",
+    "arktype": "^2.2.9",
+    "fflate": "^0.8.3",
+    "smol-toml": "^1.9.1"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "tsdown": "^0.23.7",
+    "typedoc": "^0.28.20",
+    "typescript": "^5.9.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/seba9989/koko-formats.git"
+  }
+}

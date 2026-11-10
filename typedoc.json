@@ -1,0 +1,62 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "entryPoints": [
+    "src/index.ts",
+    "src/config/index.ts",
+    "src/plugin/index.ts",
+    "src/ass/index.ts",
+    "src/lexicon/index.ts",
+    "src/numbers/index.ts",
+    "src/pack/index.ts",
+    "src/timing/index.ts",
+    "src/mp3/index.ts",
+    "src/crypto-noble/index.ts"
+  ],
+  "out": "docs",
+  "name": "@koko-anime/formats",
+  "readme": "README.md",
+  "excludeInternal": true,
+  "excludePrivate": true,
+  "sort": [
+    "source-order"
+  ],
+  "validation": {
+    "notExported": false,
+    "invalidLink": true,
+    "notDocumented": true
+  },
+  "requiredToBeDocumented": [
+    "Class",
+    "Interface",
+    "Function",
+    "Method",
+    "GetSignature",
+    "Property",
+    "TypeAlias",
+    "Variable",
+    "Enum",
+    "Constructor"
+  ],
+  "excludeExternals": true,
+  "highlightLanguages": [
+    "typescript",
+    "ts",
+    "tsx",
+    "javascript",
+    "js",
+    "json",
+    "svelte",
+    "vue",
+    "sh",
+    "bash",
+    "toml",
+    "ini",
+    "text"
+  ],
+  "disableSources": true,
+  "treatValidationWarningsAsErrors": false,
+  "navigation": {
+    "includeCategories": true,
+    "includeGroups": true
+  }
+}
