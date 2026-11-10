@@ -1,0 +1,31 @@
+# Publikacja na npm przez Trusted Publishing (OIDC) — bez tokenów.
+# Uruchamiany wypchnięciem taga vX.Y.Z zgodnego z "version" w package.json.
+name: Publish
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: npm ≥ 11.5.1 (Trusted Publishing)
+        run: npm install -g npm@latest
+      - name: Tag zgodny z wersją paczki
+        run: test "v$(node -p 'require("./package.json").version')" = "$GITHUB_REF_NAME"
+      - name: FFmpeg (testy audio)
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: bun install --frozen-lockfile
+      - name: Publikacja (prepublishOnly — typecheck, testy, build)
+        run: npm publish --access public
