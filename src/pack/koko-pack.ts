@@ -448,6 +448,14 @@ export class TimelineView {
 
 // ---------------------------------------------------------------- KokoPack
 
+/** Błąd zgłoszony przez plugin podczas `rebuild` — z nazwą capability. */
+class CapabilityFailure {
+  constructor(
+    readonly capability: 'g2p' | 'synth' | 'encoder',
+    readonly cause: unknown,
+  ) {}
+}
+
 /**
  * Paczka Koko-Pack v1 (specyfikacja API §6).
  *
@@ -919,6 +927,14 @@ export class KokoPack implements Observable {
     const signal = opts.signal;
     const fail = (e: unknown, plugin: string) =>
       signal?.aborted ? new KokoErrors([diag('KF005', { level: 'error' })]) : new KokoErrors([diag('KF004', { params: { plugin, message: String(e) } })]);
+    // Oznacza błąd capability, z której pochodzi — KF004 wskazuje właściwy plugin.
+    const via = async <T>(cap: 'g2p' | 'synth' | 'encoder', f: () => Promise<T>): Promise<T> => {
+      try {
+        return await f();
+      } catch (e) {
+        throw new CapabilityFailure(cap, e);
+      }
+    };
 
     try {
       const r = await this.#inputs(cfg, identity, signal);
@@ -937,13 +953,13 @@ export class KokoPack implements Observable {
         const u = byId.get(id)!;
         const tokens = async (s: CanonicalSegment[]) => {
           let n = 0;
-          for (const p of await g2p!.toIpa(s, lex)) n += await g2p!.tokenCount(p);
+          for (const p of await via('g2p', () => g2p!.toIpa(s, lex))) n += await via('g2p', () => g2p!.tokenCount(p));
           return n;
         };
         const parts = await splitSegments(u.segments, tokens);
         const ipa: string[] = [];
-        for (const p of parts) ipa.push(...(await g2p!.toIpa(p, lex)));
-        const res = await synth!.synthesize({ ipa, voice: voiceOf(u), speed: round4(speed), gainDb: u.params.gain, ...(signal ? { signal } : {}) });
+        for (const p of parts) ipa.push(...(await via('g2p', () => g2p!.toIpa(p, lex))));
+        const res = await via('synth', () => synth!.synthesize({ ipa, voice: voiceOf(u), speed: round4(speed), gainDb: u.params.gain, ...(signal ? { signal } : {}) }));
         if (!trackRate) trackRate = res.sampleRate;
         const out: SynthResult = { ...res, durationMs: Math.round((res.pcm.length * 1000) / res.sampleRate) };
         cache.set(k, out);
@@ -966,7 +982,7 @@ export class KokoPack implements Observable {
       const needsOld = decisions.some((d) => d.state === 'current' || d.state === 'moved');
       if (old && needsOld && encoder!.decode) {
         try {
-          const dec = await encoder!.decode(old._blob, old._params.codec as 'mp3' | 'opus');
+          const dec = await via('encoder', () => encoder!.decode!(old._blob, old._params.codec as 'mp3' | 'opus'));
           oldPcm = dec.pcm;
           if (!trackRate) trackRate = dec.sampleRate;
         } catch {
@@ -1036,7 +1052,7 @@ export class KokoPack implements Observable {
             const res = await spliceRange(b, index, { range: rg, encoderDelay: old!._params.encoderDelay, offset: old!._params.offset, sampleRate: sr, clips }, async (from, frames) => {
               const win = new Float32Array((frames + 4) * N);
               win.set(pcm.subarray(from, from + win.length));
-              return encoder!.mp3!(win, { sampleRate: sr, channels: 1, bitrateKbps: index.frames[0]!.bitrateKbps, cbr: true, noReservoir: true, rawFrames: true });
+              return via('encoder', () => encoder!.mp3!(win, { sampleRate: sr, channels: 1, bitrateKbps: index.frames[0]!.bitrateKbps, cbr: true, noReservoir: true, rawFrames: true }));
             });
             if (res instanceof KokoErrors) {
               okSplice = false;
@@ -1054,12 +1070,12 @@ export class KokoPack implements Observable {
       if (!bytes) {
         if (codec === 'opus') {
           if (!encoder!.opus) return new KokoErrors([diag('KF002', { level: 'error', params: { capability: 'encoder.opus' } })]);
-          bytes = await encoder!.opus(pcm, { sampleRate: sr, bitrateKbps: 40, channels: 1 });
+          bytes = await via('encoder', () => encoder!.opus!(pcm, { sampleRate: sr, bitrateKbps: 40, channels: 1 }));
           const pr = probeAudio(bytes, 'opus');
           params = { codec: 'opus', sampleRate: 48000, channels: 1, bitrateMode: 'vbr', spliceable: false, encoderDelay: pr?.encoderDelay ?? 312, padding: 0, offset, duration: Math.round(totalMs) };
         } else {
           if (!encoder!.mp3) return new KokoErrors([diag('KF002', { level: 'error', params: { capability: 'encoder.mp3' } })]);
-          bytes = await encoder!.mp3(pcm, { sampleRate: sr, channels: 1, bitrateKbps: chooseBitrate(sr), cbr: true, noReservoir: true });
+          bytes = await via('encoder', () => encoder!.mp3!(pcm, { sampleRate: sr, channels: 1, bitrateKbps: chooseBitrate(sr), cbr: true, noReservoir: true }));
           const pr = probeAudio(bytes, 'mp3');
           spliceable = !!pr?.mp3 && checkSpliceable(pr.mp3, bytes).length === 0 && pr.mp3.encoderDelay !== undefined;
           params = {
@@ -1123,7 +1139,7 @@ export class KokoPack implements Observable {
       this._markDirty(['audio']);
       this._core.change([this._timelineAtom, this._audioAtom], { targetId: null, kind: 'replace', path: ['timeline'] });
     } catch (e) {
-      return fail(e, cfg.capOwner('synth') ?? '?');
+      return e instanceof CapabilityFailure ? fail(e.cause, cfg.capOwner(e.capability) ?? '?') : fail(e, '@koko-anime/formats');
     }
   }
 

@@ -153,6 +153,16 @@ describe('Koko-Pack — podpisy', () => {
   });
 });
 
+describe('Koko-Pack — błędy pluginów', () => {
+  test('KF004 wskazuje plugin, który zgłosił błąd', async () => {
+    const broken = definePlugin({ name: 'broken-encoder', encoder: { mp3: async () => { throw new Error('boom'); } } });
+    defineConfig({ plugins: [nobleCrypto(), mockG2p(), mockSynth(), broken] });
+    const r = await KokoPack.create({ subtitles: ass() }).rebuild();
+    expect(r).toBeInstanceOf(KokoErrors);
+    expect((r as KokoErrors).all.map((d) => [d.code, d.params.plugin])).toEqual([['KF004', 'broken-encoder']]);
+  });
+});
+
 describe('Koko-Pack — odrzucenia', () => {
   const zipWith = (files: { name: string; data: string | Uint8Array }[]) =>
     writeZip(files.map((f) => ({ name: f.name, data: typeof f.data === 'string' ? new TextEncoder().encode(f.data) : f.data, method: 'store' as const })));
