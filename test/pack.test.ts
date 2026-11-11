@@ -128,7 +128,7 @@ describe('Koko-Pack — podpisy', () => {
     // rejestr
     defineConfig({
       registry: { url: 'https://registry.example' },
-      plugins: [definePlugin({ name: 'fake-fetch', fetch: async (url) => {
+      plugins: [definePlugin({ name: 'fake-fetch', api: '0.4', fetch: async (url) => {
         if (url.endsWith('/v1/creators/seba9989')) return new Response(JSON.stringify({ creator: 'seba9989', keys: [{ publicKey: pubB64, revoked: null }] }));
         return new Response('', { status: 404 });
       } })],
@@ -155,7 +155,7 @@ describe('Koko-Pack — podpisy', () => {
 
 describe('Koko-Pack — błędy pluginów', () => {
   test('KF004 wskazuje plugin, który zgłosił błąd', async () => {
-    const broken = definePlugin({ name: 'broken-encoder', encoder: { mp3: async () => { throw new Error('boom'); } } });
+    const broken = definePlugin({ name: 'broken-encoder', api: '0.4', encoder: { mp3: async () => { throw new Error('boom'); } } });
     defineConfig({ plugins: [nobleCrypto(), mockG2p(), mockSynth(), broken] });
     const r = await KokoPack.create({ subtitles: ass() }).rebuild();
     expect(r).toBeInstanceOf(KokoErrors);

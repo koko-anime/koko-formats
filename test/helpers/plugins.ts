@@ -6,6 +6,7 @@ import { SR, decodeRaw, encodeMp3, encodeOpus } from './audio.ts';
 export const mockG2p = () =>
   definePlugin({
     name: 'mock-g2p',
+    api: '0.4',
     g2p: {
       toIpa: async (segs: CanonicalSegment[]) => [segs.map((s) => (s.t === 'pause' ? ' ' : s.s)).join(' ')],
       tokenCount: async (ipa: string) => Math.ceil(ipa.length / 2),
@@ -19,6 +20,7 @@ export const synthCalls: { speed: number; text: string }[] = [];
 export const mockSynth = () =>
   definePlugin({
     name: 'mock-synth',
+    api: '0.4',
     synth: {
       info: async () => ({ engine: 'mock 1.0', model: 'mock-model', g2p: 'mock-g2p 1.0' }),
       synthesize: async (req) => {
@@ -39,6 +41,7 @@ export const encodeCalls: { raw: boolean; samples: number }[] = [];
 export const ffmpegEncoder = () =>
   definePlugin({
     name: 'ffmpeg',
+    api: '0.4',
     encoder: {
       mp3: async (pcm, o) => {
         encodeCalls.push({ raw: !!o.rawFrames, samples: pcm.length });

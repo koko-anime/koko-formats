@@ -1,16 +1,17 @@
 /**
  * `KokoAss` — dokument Koko-ASS v1 (specyfikacja API §4).
  */
-import { resolveConfig, type CallConfig } from '../core/config-store.ts';
+import { pluginFailure, resolveConfig, type CallConfig } from '../core/config-store.ts';
 import { diag, type Diagnostic } from '../core/diagnostics.ts';
 import { Derived, DocCore, markRaw, newId, type ChangeListener, type Observable } from '../core/doc-core.ts';
 import { KokoErrors } from '../core/errors.ts';
 import { ItemCollection, type Collection } from '../core/collections.ts';
-import type { Atom, CanonicalSegment, ResolvedLexicon } from '../core/plugin-types.ts';
+import type { AssRule, Atom, CanonicalSegment, FormatCodec, FormatInfo, OperationOptions, ResolvedLexicon, RuleLineView, RuleReport, RuleSettings } from '../core/plugin-types.ts';
 import { foldCase, nfc } from '../core/text.ts';
 import { KokoLexicon, flattenLines } from '../lexicon/lexicon.ts';
 import {
   analyze,
+  extensionDiag,
   segmentsText,
   utteranceKey,
   type AnalysisInput,
@@ -196,6 +197,9 @@ export class KokoAss implements Observable, AssOwner {
   #analysis: Derived<AnalysisResult>;
   #diagnostics: Derived<readonly Diagnostic[]>;
   #utterances: Derived<readonly Utterance[]>;
+  #rules: Derived<RuleResults>;
+  #ruleMemo = new Map<string, { sig: string; diags: Diagnostic[] }>();
+  #mergedLines = new WeakMap<LineAnalysis, LineAnalysis>();
 
   private constructor(call?: CallConfig) {
     this._core = new DocCore(this, call);
@@ -212,8 +216,9 @@ export class KokoAss implements Observable, AssOwner {
     this._extra = new ItemCollection<RawSection>(this._core, 'extraSections');
     this.extraSections = this._extra;
     this.#seriesAtom = this._core.atom('series');
-    this.#analysis = new Derived(this._core, () => analyze(this.#snapshot()), 'analysis');
-    this.#diagnostics = new Derived(this._core, () => Object.freeze(this.#computeDiagnostics()), 'diagnostics');
+    this.#analysis = new Derived(this._core, () => analyze(this.#snapshot()), 'analysis', true);
+    this.#diagnostics = new Derived(this._core, () => Object.freeze(this.#computeDiagnostics()), 'diagnostics', true);
+    this.#rules = new Derived(this._core, () => this.#computeRules(), 'rules', true);
     this.#utterances = new Derived(
       this._core,
       () => {
@@ -222,6 +227,7 @@ export class KokoAss implements Observable, AssOwner {
         return Object.freeze(a.utterances.map((u) => new Utterance(u, auto)));
       },
       'utterances',
+      true,
     );
     markRaw(this);
   }
@@ -261,7 +267,94 @@ export class KokoAss implements Observable, AssOwner {
 
   /** @internal */
   _lineAnalysis(id: string): LineAnalysis {
-    return this._core.untrack(() => this.#analysis.get().lines.get(id)) ?? EMPTY_ANALYSIS;
+    return this._core.untrack(() => {
+      const base = this.#analysis.get().lines.get(id);
+      if (!base) return EMPTY_ANALYSIS;
+      const extra = this.#rules.get().byLine.get(id);
+      if (!extra?.length) return base;
+      let merged = this.#mergedLines.get(base);
+      if (!merged || merged.diagnostics.length !== base.diagnostics.length + extra.length) {
+        merged = Object.freeze({ ...base, diagnostics: Object.freeze([...base.diagnostics, ...extra]) });
+        this.#mergedLines.set(base, merged);
+      }
+      return merged;
+    });
+  }
+
+  // ------------------------------------------------------------ reguły pluginów (§2.9)
+
+  #computeRules(): RuleResults {
+    const cfg = resolveConfig(this._core.call);
+    const active = cfg.list('rules').filter(({ item }) => {
+      const s = cfg.rules[item.code];
+      return s === undefined ? item.enabled !== false : s !== 'off';
+    });
+    const byLine = new Map<string, Diagnostic[]>();
+    const all: Diagnostic[] = [];
+    if (!active.length) {
+      this.#ruleMemo.clear();
+      return { byLine, all };
+    }
+    const a = this.#analysis.get();
+    const utterances = this.#utterances.get();
+    const uttById = new Map(utterances.map((u) => [u.id, u]));
+    const settings = a.settings as unknown as RuleSettings;
+    const settingsSig = JSON.stringify(a.settings);
+    const lines: RuleLineView[] = [];
+    for (const e of this.events.items) {
+      if (e._type !== 'Dialogue' && e._type !== 'Comment') continue;
+      const la = a.lines.get(e.id);
+      const utt = la?.utteranceId ? uttById.get(la.utteranceId) : undefined;
+      lines.push(Object.freeze({
+        id: e.id, text: e._text, style: e._style, actor: e._name, start: e._start, end: e._end,
+        comment: e._type === 'Comment', spokenText: la?.spokenText ?? '', ...(utt ? { utterance: utt } : {}),
+      }));
+    }
+    const make = (rule: AssRule, r: RuleReport): Diagnostic => {
+      const s = cfg.rules[rule.code];
+      const level = s === 'error' || s === 'warning' || s === 'info' ? s : (r.level ?? rule.level);
+      return extensionDiag({ code: rule.code, level, title: rule.title, ...(rule.hint !== undefined ? { hint: rule.hint } : {}), ...(r.params ? { params: r.params } : {}) }, r.targetId, cfg.messages);
+    };
+    const failed = (rule: AssRule, owner: string, e: unknown, targetId?: string) =>
+      diag('KF009', { ...(targetId ? { targetId } : {}), params: { rule: rule.code, plugin: owner, message: String(e) } });
+    const push = (d: Diagnostic) => {
+      all.push(d);
+      if (d.targetId) {
+        const l = byLine.get(d.targetId) ?? [];
+        l.push(d);
+        byLine.set(d.targetId, l);
+      }
+    };
+    const memo = new Map<string, { sig: string; diags: Diagnostic[] }>();
+    for (const { owner, item: rule } of active) {
+      if (rule.scope === 'line') {
+        for (const line of lines) {
+          const k = `${rule.code}\u0000${line.id}`;
+          const u = line.utterance;
+          const sig = JSON.stringify([line.text, line.style, line.actor, line.start, line.end, line.comment, line.spokenText, u?.id, u?.text, u?.lineIds, settingsSig, cfg.rules[rule.code]]);
+          let hit = this.#ruleMemo.get(k);
+          if (!hit || hit.sig !== sig) {
+            let diags: Diagnostic[];
+            try {
+              diags = (rule.check(line, settings) ?? []).map((r) => make(rule, r));
+            } catch (e) {
+              diags = [failed(rule, owner, e, line.id)];
+            }
+            hit = { sig, diags };
+          }
+          memo.set(k, hit);
+          hit.diags.forEach(push);
+        }
+      } else {
+        try {
+          for (const r of rule.check({ lines, utterances }, settings) ?? []) push(make(rule, r));
+        } catch (e) {
+          push(failed(rule, owner, e));
+        }
+      }
+    }
+    this.#ruleMemo = memo;
+    return { byLine, all };
   }
 
   // ------------------------------------------------------------ tworzenie
@@ -484,7 +577,7 @@ export class KokoAss implements Observable, AssOwner {
     try {
       text = await fs.readText(path);
     } catch (e) {
-      return new KokoErrors([diag('KF004', { params: { plugin: cfg.capOwner('fs') ?? '?', message: String(e) } })]);
+      return new KokoErrors([pluginFailure(e, cfg.capOwner('fs'))]);
     }
     const doc = KokoAss.parse(text, { path, ...(opts.config ? { config: opts.config } : {}) });
     if (doc instanceof KokoErrors) return doc;
@@ -507,7 +600,7 @@ export class KokoAss implements Observable, AssOwner {
         doc.#bindSeries(lx);
       }
     } catch (e) {
-      doc.#parseDiags.push(diag('KF004', { params: { plugin: cfg.capOwner('fs') ?? '?', message: String(e) } }));
+      doc.#parseDiags.push(pluginFailure(e, cfg.capOwner('fs')));
     }
     return doc;
   }
@@ -590,8 +683,57 @@ export class KokoAss implements Observable, AssOwner {
       styles: this.koko.styles.items.map((r) => ({ id: r.id, pattern: r._pattern, skip: r._skip, params: r.params.map((p) => ({ ...p })) })),
       lexicon: this.koko.lexicon.items.filter((i) => i.kind === 'entry').map((i) => ({ id: i.id, key: i._key, stem: i._stem, value: i._value })),
       series: this.#series ? this.#series._effectiveRaw() : null,
-      defaultVoice: resolveConfig().defaults.voice,
+      ...this.#pluginInputs(),
     };
+  }
+
+  #pluginInputs(): Pick<AnalysisInput, 'defaultVoice' | 'normalizers' | 'messages'> {
+    const cfg = resolveConfig(this._core.call);
+    const normalizers = cfg
+      .list('normalizers')
+      .filter(({ item }) => {
+        if (item.id.startsWith('koko/')) return false; // zarezerwowane dla etapów wbudowanych
+        if (item.languages && !item.languages.includes('pl')) return false;
+        const s = cfg.normalizers[item.id];
+        return item.activation === 'always' ? s !== 'off' : s === 'on';
+      })
+      .map(({ owner, item }) => ({ id: item.id, order: item.order, owner, normalize: item.normalize.bind(item) }));
+    return { defaultVoice: cfg.defaults.voice, normalizers, messages: cfg.messages };
+  }
+
+  // ------------------------------------------------------------ import i eksport (§2.11)
+
+  /**
+   * Import z formatu zarejestrowanego przez plugin (`formats`) albo wbudowanego `ass`.
+   * Nieznany format → KF012; wyjątek kodera → KF004.
+   */
+  static async import(format: string, input: string | Blob, opts: FormatOptions & { language?: string } = {}): Promise<KokoAss | KokoErrors> {
+    const cfg = resolveConfig(opts.config);
+    const found = findCodec(cfg, format);
+    if (!found?.codec.import) return new KokoErrors([diag('KF012', { params: { format, operation: 'import' } })]);
+    try {
+      const r: unknown = await found.codec.import(input, opOptions(opts, { ...(opts.language ? { language: opts.language } : {}), ...(opts.config ? { config: opts.config } : {}) }));
+      if (r instanceof KokoAss || r instanceof KokoErrors) return r;
+      return new KokoErrors([diag('KF004', { params: { plugin: found.owner, message: 'import() nie zwrócił KokoAss' } })]);
+    } catch (e) {
+      if (opts.signal?.aborted) return new KokoErrors([diag('KF005', { level: 'error' })]);
+      return new KokoErrors([pluginFailure(e, found.owner)]);
+    }
+  }
+
+  /** Eksport do formatu zarejestrowanego przez plugin albo wbudowanego `ass` (bez sekcji Koko). */
+  async export(format: string, opts: FormatOptions & Record<string, unknown> = {}): Promise<string | Blob | KokoErrors> {
+    const cfg = resolveConfig((opts.config as CallConfig | undefined) ?? this._core.call);
+    const found = findCodec(cfg, format);
+    if (!found?.codec.export) return new KokoErrors([diag('KF012', { params: { format, operation: 'export' } })]);
+    try {
+      const r: unknown = await found.codec.export(this, opOptions(opts, opts));
+      if (typeof r === 'string' || r instanceof Blob || r instanceof KokoErrors) return r;
+      return new KokoErrors([diag('KF004', { params: { plugin: found.owner, message: 'export() nie zwrócił string | Blob' } })]);
+    } catch (e) {
+      if (opts.signal?.aborted) return new KokoErrors([diag('KF005', { level: 'error' })]);
+      return new KokoErrors([pluginFailure(e, found.owner)]);
+    }
   }
 
   #computeDiagnostics(): Diagnostic[] {
@@ -628,6 +770,7 @@ export class KokoAss implements Observable, AssOwner {
       labels.add(f);
     }
     out.push(...this.#analysis.get().diagnostics);
+    out.push(...this.#rules.get().all);
     return out;
   }
 
@@ -690,7 +833,7 @@ export class KokoAss implements Observable, AssOwner {
       const { diagnostics } = await this.#resolve(cfg, opts.signal);
       extra.push(...diagnostics);
     } catch (e) {
-      extra.push(diag('KF004', { params: { plugin: cfg.capOwner('g2p') ?? '?', message: String(e) } }));
+      extra.push(pluginFailure(e, cfg.capOwner('g2p')));
     }
     return [...base, ...extra];
   }
@@ -706,7 +849,7 @@ export class KokoAss implements Observable, AssOwner {
       return (await this.#resolve(cfg, opts.signal)).utterances;
     } catch (e) {
       if (opts.signal?.aborted) return new KokoErrors([diag('KF005', { level: 'error' })]);
-      return new KokoErrors([diag('KF004', { params: { plugin: cfg.capOwner('g2p') ?? '?', message: String(e) } })]);
+      return new KokoErrors([pluginFailure(e, cfg.capOwner('g2p'))]);
     }
   }
 
@@ -828,6 +971,92 @@ export class KokoAss implements Observable, AssOwner {
 }
 
 const EMPTY_ANALYSIS: LineAnalysis = Object.freeze({ read: false, spokenText: '', displayText: '', diagnostics: Object.freeze([]) });
+
+/** @internal Wynik reguł pluginów. */
+interface RuleResults {
+  byLine: Map<string, Diagnostic[]>;
+  all: Diagnostic[];
+}
+
+/** Opcje `KokoAss.import` / `doc.export`. */
+export interface FormatOptions extends OperationOptions {
+  /** Nadpisanie konfiguracji dla tego wywołania. */
+  config?: CallConfig;
+}
+
+function opOptions<T extends object>(opts: OperationOptions, rest: T): OperationOptions & T {
+  const { signal, onProgress } = opts;
+  const out = { ...rest } as OperationOptions & T & { config?: unknown };
+  delete out.config;
+  if (signal) out.signal = signal;
+  if (onProgress) out.onProgress = onProgress;
+  return out;
+}
+
+const BUILTIN = '@koko-anime/formats';
+
+/** Wbudowany format `ass`: zwykły ASS. Import tworzy szkielet Koko (wersja 1), eksport usuwa sekcje Koko. */
+const ASS_CODEC: FormatCodec<KokoAss> = {
+  id: 'ass',
+  label: 'Advanced SubStation Alpha',
+  extensions: ['.ass', '.ssa'],
+  mime: 'text/x-ssa',
+  async import(input, opts) {
+    const text = typeof input === 'string' ? input : await input.text();
+    const r = KokoAss.parse(text, (opts as { config?: CallConfig }).config ? { config: (opts as { config?: CallConfig }).config! } : {});
+    if (r instanceof KokoErrors) return r;
+    if (r.scriptInfo.kokoVersion === null) r.scriptInfo.kokoVersion = 1;
+    return r;
+  },
+  async export(doc) {
+    const out: string[] = [];
+    let skip = false;
+    for (const line of doc.toString().split('\n')) {
+      const sec = /^\[(.+)\]$/.exec(line.trim());
+      if (sec) skip = /^koko /i.test(sec[1]!);
+      if (skip || /^kokoanime version\s*:/i.test(line.trim())) continue;
+      out.push(line);
+    }
+    return out.join('\n').replace(/\n{3,}/g, '\n\n');
+  },
+  sniff: (head) => /^﻿?\s*\[Script Info\]/i.test(head),
+};
+
+function codecs(cfg: ReturnType<typeof resolveConfig>): { owner: string; codec: FormatCodec }[] {
+  const byId = new Map<string, { owner: string; codec: FormatCodec }>([[ASS_CODEC.id, { owner: BUILTIN, codec: ASS_CODEC }]]);
+  for (const { owner, item } of cfg.list('formats')) {
+    byId.delete(item.id);
+    byId.set(item.id, { owner, codec: item });
+  }
+  return [...byId.values()];
+}
+
+function findCodec(cfg: ReturnType<typeof resolveConfig>, id: string): { owner: string; codec: FormatCodec } | undefined {
+  return codecs(cfg).find((c) => c.codec.id === id);
+}
+
+/** Formaty importu/eksportu: wbudowany `ass` i formaty z pluginów (`formats`). */
+export function listFormats(opts: { config?: CallConfig } = {}): FormatInfo[] {
+  return codecs(resolveConfig(opts.config)).map(({ owner, codec }) => {
+    const info: FormatInfo = { id: codec.id, label: codec.label, extensions: [...codec.extensions], canImport: !!codec.import, canExport: !!codec.export, plugin: owner };
+    if (codec.mime) info.mime = codec.mime;
+    return info;
+  });
+}
+
+/** Wykrywa format po początku treści (`sniff`); ostatni pasujący plugin wygrywa. */
+export function sniffFormat(head: string, opts: { config?: CallConfig } = {}): string | undefined {
+  const list = codecs(resolveConfig(opts.config));
+  for (let i = list.length - 1; i >= 0; i--) {
+    const c = list[i]!.codec;
+    try {
+      if (c.import && c.sniff?.(head)) return c.id;
+    } catch {
+      // błędny sniff pluginu = brak dopasowania
+    }
+  }
+  return undefined;
+}
 
 /** Oznacza blok spłaszczonego leksykonu (dokładnie jeden begin przed jednym end). */
 function markFlattened(items: EpisodeLexiconItem[]): void {

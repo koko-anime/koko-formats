@@ -2,9 +2,9 @@
  * Analiza deterministyczna Koko-ASS (§4.1–§4.5) i segmenty kanoniczne (Koko-Pack §6.2).
  * Czyste funkcje na migawce danych dokumentu — wynik MUSI być identyczny w każdej implementacji.
  */
-import { diag, type Diagnostic } from '../core/diagnostics.ts';
+import { diag, type Diagnostic, type DiagnosticLevel, type ExtensionDiagnosticCode } from '../core/diagnostics.ts';
 import { jcs, round4, sha256Tag } from '../core/hash.ts';
-import type { CanonicalSegment, ResolvedLexiconEntry } from '../core/plugin-types.ts';
+import type { CanonicalSegment, ResolvedLexiconEntry, RuleSettings, TextNormalizer } from '../core/plugin-types.ts';
 import { compileSkipRegex, foldCase, isWordChar, matchesAny, wildcardMatch } from '../core/text.ts';
 import { expandNumbers, NUMBERS_RULES_VERSION } from '../numbers/expand.ts';
 import type { EffectiveLexiconEntry } from '../lexicon/lexicon.ts';
@@ -58,6 +58,30 @@ export interface AnalysisInput {
   lexicon: readonly EpisodeLexiconInput[];
   series: readonly EffectiveLexiconEntry[] | null;
   defaultVoice: string | undefined;
+  /** Aktywne normalizatory pluginów (bez wbudowanego etapu liczb). */
+  normalizers: readonly NormalizerInput[];
+  /** Nadpisania komunikatów (diagnostyki `X:`). */
+  messages: Partial<Record<string, { title?: string; hint?: string }>>;
+}
+
+/** @internal Normalizator pluginu po rozstrzygnięciu konfiguracji. */
+export interface NormalizerInput {
+  id: string;
+  order: number;
+  owner: string;
+  normalize: TextNormalizer['normalize'];
+}
+
+/** Zamiana tekstu wykonana przez normalizator (§2.10). */
+export interface LineReplacement {
+  /** `id` normalizatora. */
+  readonly normalizer: string;
+  /** Tekst przed. */
+  readonly from: string;
+  /** Tekst po. */
+  readonly to: string;
+  /** Indeks w tekście wejściowym etapu. */
+  readonly index: number;
 }
 
 // ---------------------------------------------------------------- wynik
@@ -77,6 +101,8 @@ export interface LineAnalysis {
   readonly displayText: string;
   /** ID wypowiedzi, do której należy linia. */
   readonly utteranceId?: string;
+  /** Zamiany wykonane przez normalizatory pluginów (podgląd). */
+  readonly replacements?: readonly LineReplacement[];
   /** Diagnostyki tej linii. */
   readonly diagnostics: readonly Diagnostic[];
 }
@@ -636,10 +662,37 @@ function checkNames(units: Unit[], ignore: readonly string[], lineId: string, di
 
 // ---------------------------------------------------------------- analiza
 
+/** Język tekstu Koko-ASS v1 (kontekst normalizatorów). */
+const DOCUMENT_LANGUAGE = 'pl';
+/** Wbudowany etap rozwijania liczb (`Numbers = auto`). */
+const NUMBERS_STAGE = Object.freeze({ id: 'koko/numbers-pl', order: 500, owner: '@koko-anime/formats' });
+type PipelineStage = NormalizerInput | typeof NUMBERS_STAGE;
+
+/** @internal Diagnostyka `X:` z pluginu (reguły, normalizatory). */
+export function extensionDiag(
+  d: { code: ExtensionDiagnosticCode; level?: DiagnosticLevel; title?: string; hint?: string; params?: Readonly<Record<string, string | number | boolean>> },
+  targetId: string | undefined,
+  messages: Partial<Record<string, { title?: string; hint?: string }>>,
+): Diagnostic {
+  const o = messages[d.code];
+  const out: Diagnostic = {
+    code: d.code,
+    level: d.level ?? 'info',
+    title: o?.title ?? d.title ?? d.code,
+    params: Object.freeze({ ...(d.params ?? {}) }),
+    source: 'ass',
+  };
+  const hint = o?.hint ?? d.hint;
+  if (hint !== undefined) out.hint = hint;
+  if (targetId !== undefined) out.targetId = targetId;
+  return out;
+}
+
 interface LineWork {
   ev: EventInput;
   kk: LineKk;
   read: boolean;
+  replacements: LineReplacement[];
   skipReason?: SkipReason;
   units: Unit[];
   spoken: string;
@@ -665,6 +718,9 @@ export function analyze(input: AnalysisInput): AnalysisResult {
     // KK006 już zgłoszone przez effective()
   }
   const numbersAuto = rules.Numbers === 'auto';
+  const pipeline: PipelineStage[] = [...input.normalizers, ...(numbersAuto ? [NUMBERS_STAGE] : [])].sort(
+    (a, b) => a.order - b.order || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+  );
 
   // Parametry stylów [Koko Styles]: walidacja.
   for (const r of input.styles) {
@@ -707,7 +763,7 @@ export function analyze(input: AnalysisInput): AnalysisResult {
       spokenParts = clean(piecesFromPlain(kk.say), true).parts;
     } else spokenParts = clean(kk.pieces, true).parts;
 
-    const w: LineWork = { ev, kk, read: false, units: [], spoken: '', display: displayClean.display, params, diags: ld };
+    const w: LineWork = { ev, kk, read: false, replacements: [], units: [], spoken: '', display: displayClean.display, params, diags: ld };
     // §4.1
     const flags = kk.flags;
     const empty = partsEmpty(spokenParts);
@@ -732,14 +788,28 @@ export function analyze(input: AnalysisInput): AnalysisResult {
       if (p.t === 'pause') units.push({ t: 'pause', s: '', ms: p.ms });
       else if (p.t === 'range') units.push(p.kind === 'ipa' ? { t: 'ipa', s: p.value, protected: true } : { t: 'text', s: p.value, protected: true });
       else {
+        // Potok normalizacji (§2.10): etapy w kolejności `order`, potem leksykon.
         let s = p.s;
-        if (numbersAuto) {
-          const ex = expandNumbers(s);
-          s = ex.text;
-          if (w.read)
-            for (const e of ex.expansions)
-              ld.push(diag(e.code, { targetId: ev.id, params: e.code === 'KK202' ? { text: e.original } : { from: e.original, to: e.replacement } }));
-        } else if (w.read && /\p{Nd}/u.test(s) && !ld.some((d) => d.code === 'KK202')) {
+        for (const stage of pipeline) {
+          if (!('normalize' in stage)) {
+            const ex = expandNumbers(s);
+            s = ex.text;
+            if (w.read)
+              for (const e of ex.expansions)
+                ld.push(diag(e.code, { targetId: ev.id, params: e.code === 'KK202' ? { text: e.original } : { from: e.original, to: e.replacement } }));
+            continue;
+          }
+          try {
+            const r = stage.normalize(s, { language: DOCUMENT_LANGUAGE, settings: settings as unknown as RuleSettings, lineId: ev.id });
+            if (typeof r?.text !== 'string') throw new TypeError('normalize() nie zwrócił { text }');
+            for (const x of r.replacements ?? []) w.replacements.push({ normalizer: stage.id, from: x.from, to: x.to, index: x.index });
+            if (w.read) for (const d of r.diagnostics ?? []) ld.push(extensionDiag(d, ev.id, input.messages));
+            s = r.text;
+          } catch (e) {
+            ld.push(diag('KF010', { targetId: ev.id, params: { normalizer: stage.id, plugin: stage.owner, message: String(e) } }));
+          }
+        }
+        if (!numbersAuto && w.read && /\p{Nd}/u.test(s) && !ld.some((d) => d.code === 'KK202')) {
           ld.push(diag('KK202', { targetId: ev.id }));
         }
         units.push(...applyLexicon(s, patterns));
@@ -807,17 +877,21 @@ export function analyze(input: AnalysisInput): AnalysisResult {
     };
     utterances.push(u);
     for (const w of g) {
-      lines.set(w.ev.id, Object.freeze({ read: true, spokenText: w.spoken, displayText: w.display, utteranceId: u.id, diagnostics: Object.freeze(w.diags) }));
+      lines.set(w.ev.id, Object.freeze({ read: true, spokenText: w.spoken, displayText: w.display, utteranceId: u.id, ...replOf(w), diagnostics: Object.freeze(w.diags) }));
     }
   }
   for (const w of works) {
     if (lines.has(w.ev.id)) continue;
-    const la: LineAnalysis = { read: false, spokenText: w.spoken, displayText: w.display, diagnostics: Object.freeze(w.diags) };
+    const la: LineAnalysis = { read: false, spokenText: w.spoken, displayText: w.display, ...replOf(w), diagnostics: Object.freeze(w.diags) };
     if (w.skipReason) (la as { skipReason?: SkipReason }).skipReason = w.skipReason;
     lines.set(w.ev.id, Object.freeze(la));
   }
   for (const w of works) diagnostics.push(...(lines.get(w.ev.id)?.diagnostics ?? []));
   return { settings, lines, utterances, lexicon, diagnostics };
+}
+
+function replOf(w: LineWork): { replacements?: readonly LineReplacement[] } {
+  return w.replacements.length ? { replacements: Object.freeze(w.replacements.map((r) => Object.freeze(r))) } : {};
 }
 
 export { NUMBERS_RULES_VERSION };

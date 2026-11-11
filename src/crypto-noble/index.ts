@@ -29,6 +29,7 @@ export interface NobleCryptoPlugin extends KokoPlugin {
 export function nobleCrypto(): NobleCryptoPlugin {
   return definePlugin({
     name: 'crypto-noble',
+    api: '0.4',
     crypto: {
       sha256: (data) => sha256(data),
       ed25519Sign: async (message, privateKey) => ed.sign(message, privateKey),

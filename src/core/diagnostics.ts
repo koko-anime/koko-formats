@@ -2,11 +2,13 @@
  * Diagnostyki (specyfikacja API §3.5) i katalog domyślnych komunikatów ze specyfikacji formatów.
  */
 import { currentConfig } from './config-store.ts';
+import type { ExtensionDiagnosticCode } from './plugin-types.ts';
 
 /** Poziom: `error` — wynik wadliwy, `warning` — coś pominięto/poprawiono, `info` — podpowiedź. */
 export type DiagnosticLevel = 'error' | 'warning' | 'info';
-/** Kod: `KK` Koko-ASS, `KL` Koko-Lexicon, `KP` Koko-Pack, `KF` biblioteka. */
-export type DiagnosticCode = `KK${string}` | `KL${string}` | `KP${string}` | `KF${string}`;
+/** Kod: `KK` Koko-ASS, `KL` Koko-Lexicon, `KP` Koko-Pack, `KF` biblioteka, `X:<dostawca>/<reguła>` pluginy. */
+export type DiagnosticCode = `KK${string}` | `KL${string}` | `KP${string}` | `KF${string}` | ExtensionDiagnosticCode;
+export type { ExtensionDiagnosticCode };
 /** Źródło diagnostyki (wynika z prefiksu kodu). */
 export type DiagnosticSource = 'ass' | 'lexicon' | 'pack' | 'library';
 /** Parametry diagnostyki, np. `{ from: '3', to: 'trzech' }` dla KK203. */
@@ -119,6 +121,12 @@ export const CATALOG: Readonly<Record<string, CatalogEntry>> = {
   KF004: { level: 'error', title: 'Plugin zgłosił błąd' },
   KF005: { level: 'info', title: 'Operacja przerwana' },
   KF006: { level: 'info', title: 'Dokument nie jest reaktywny', hint: 'Zaimportuj konfigurację z pluginem reaktywności przed utworzeniem dokumentu.' },
+  KF007: { level: 'error', title: 'Niezgodna wersja API pluginu', hint: 'Zaktualizuj plugin albo bibliotekę; plugin bez pola api działa jak 0.3 (ostrzeżenie).' },
+  KF008: { level: 'error', title: 'Błąd inicjalizacji pluginu', hint: 'Sprawdź log pluginu i wywołaj retryPlugin(nazwa).' },
+  KF009: { level: 'warning', title: 'Reguła pluginu zgłosiła wyjątek', hint: 'Reguła pominięta dla tego elementu; zgłoś błąd autorowi pluginu.' },
+  KF010: { level: 'warning', title: 'Normalizator pluginu zgłosił wyjątek', hint: 'Tekst pozostawiony bez zmian przez ten etap.' },
+  KF011: { level: 'warning', title: 'Zduplikowany identyfikator w pluginach', hint: 'Obowiązuje element z ostatniego pluginu.' },
+  KF012: { level: 'error', title: 'Nieznany format importu/eksportu', hint: 'Sprawdź listFormats() i pluginy z capability formats.' },
 };
 
 /** @internal */
@@ -134,6 +142,7 @@ function sourceOf(code: string): DiagnosticSource {
   if (code.startsWith('KK')) return 'ass';
   if (code.startsWith('KL')) return 'lexicon';
   if (code.startsWith('KP')) return 'pack';
+  if (code.startsWith('X:')) return 'ass';
   return 'library';
 }
 

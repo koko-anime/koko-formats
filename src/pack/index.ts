@@ -10,7 +10,7 @@
  *
  * pack.subtitles.events.dialogues[3]!.kk.say = 'Krócej.';
  * const plan = await pack.reconcile();      // co trzeba przeliczyć
- * await pack.rebuild(undefined, { onProgress: (d, t) => console.log(d / t) });
+ * await pack.rebuild(undefined, { onProgress: (e) => e.stage === 'synth' && console.log(e.done / (e.total ?? 1)) });
  * const out = await pack.toBlob({ profile: 'distribution' });
  * ```
  *

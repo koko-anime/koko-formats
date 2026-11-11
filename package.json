@@ -1,6 +1,6 @@
 {
   "name": "@koko-anime/formats",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Koko-ASS, Koko-Lexicon i Koko-Pack: parsowanie, edycja i zapis (Koko-Anime)",
   "license": "MIT",
   "type": "module",

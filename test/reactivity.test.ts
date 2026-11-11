@@ -25,7 +25,7 @@ function signals() {
   };
   const untrack = <T>(fn: () => T): T => { const prev = current; current = null; try { return fn(); } finally { current = prev; } };
   const batch = (fn: () => void) => { depth++; try { fn(); } finally { depth--; if (!depth) { const p = [...pending]; pending.clear(); p.forEach((f) => f()); } } };
-  return { plugin: definePlugin({ name: 'signals', reactivity: { createAtom, untrack, batch } }), effect };
+  return { plugin: definePlugin({ name: 'signals', api: '0.4', reactivity: { createAtom, untrack, batch } }), effect };
 }
 
 afterEach(() => resetConfig());

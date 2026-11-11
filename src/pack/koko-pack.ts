@@ -1,12 +1,13 @@
 /**
  * `KokoPack` — paczka Koko-Pack v1 (specyfikacja API §6, Koko-Pack §1–§8).
  */
-import { resolveConfig, type CallConfig, type ResolvedConfig } from '../core/config-store.ts';
+import { pluginFailure, resolveConfig, type CallConfig, type ResolvedConfig } from '../core/config-store.ts';
+import { LIB_VERSION } from '../core/version.ts';
 import { diag, type Diagnostic } from '../core/diagnostics.ts';
 import { DocCore, markRaw, type ChangeListener, type Observable } from '../core/doc-core.ts';
 import { KokoErrors } from '../core/errors.ts';
 import { jcs, round4, sha256Blob, sha256Tag, sha256Bytes } from '../core/hash.ts';
-import type { Atom, CanonicalSegment, SynthesisInfo, SynthResult } from '../core/plugin-types.ts';
+import type { Atom, CanonicalSegment, OperationOptions, ProgressEvent, SynthesisInfo, SynthResult } from '../core/plugin-types.ts';
 import { fromUtf8, nfc, utf8 } from '../core/text.ts';
 import { KokoAss, TOKEN_LIMIT, type Utterance } from '../ass/koko-ass.ts';
 import { NUMBERS_RULES_VERSION } from '../numbers/expand.ts';
@@ -33,7 +34,6 @@ import { entryBlob, readZip, writeZip, type ZipEntry, type ZipWriteEntry } from 
 export const MIMETYPE = 'application/vnd.koko-anime.pack+zip';
 /** Obsługiwana wersja Koko-Pack (`manifest.version`). */
 export const KOKO_PACK_VERSION = 1;
-const LIB_VERSION = '0.3.0';
 
 /** Profil paczki: `full` — roboczy (Koko-Editor), `distribution` — dla widzów (okrojona oś czasu, bez `cache/`). */
 export type PackProfile = 'full' | 'distribution';
@@ -62,8 +62,8 @@ export interface SigningKey {
   keyId: string;
   /** `koko` — weryfikacja przez centralny rejestr twórców. */
   registry?: 'koko';
-  /** Klucz prywatny (32 B). */
-  privateKey: Uint8Array;
+  /** Klucz prywatny (32 B). Brak → podpis przez capability `signer` (§2.13). */
+  privateKey?: Uint8Array;
   /** Klucz publiczny — domyślnie wyliczany przez `crypto.ed25519PublicKey`. */
   publicKey?: Uint8Array;
 }
@@ -104,8 +104,10 @@ export interface ReconcilePlan {
 export interface RebuildOptions {
   /** Przerwanie (KF005). */
   signal?: AbortSignal;
-  /** Postęp syntezy. */
-  onProgress?: (done: number, total: number, utteranceId: string) => void;
+  /** Postęp (etapy `measure`, `synth`, `decode`, `encode` oraz zdarzenia pluginów). */
+  onProgress?: (e: ProgressEvent) => void;
+  /** `false` — pomiń capability `synthCache` (pełna synteza). Domyślnie `true`. */
+  cache?: boolean;
   /** Kodek przy pierwszej przebudowie (domyślnie mp3 CBR, spliceable). */
   codec?: 'mp3' | 'opus';
   /** Tożsamość syntezy (domyślnie z `synth.info()`). */
@@ -749,15 +751,13 @@ export class KokoPack implements Observable {
         pack.#extensions.set(vendor, m);
       }
     }
-    for (const p of cfg.plugins) {
-      for (const h of p.packExtensions ?? []) {
-        const files = pack.#extensions.get(h.vendor);
-        if (files && h.onOpen) {
-          try {
-            await h.onOpen(files, manifest.extensions?.[h.vendor]);
-          } catch (e) {
-            diags.push(diag('KF004', { params: { plugin: p.name, message: String(e) } }));
-          }
+    for (const { owner, item: h } of cfg.list('packExtensions')) {
+      const files = pack.#extensions.get(h.vendor);
+      if (files && h.onOpen) {
+        try {
+          await h.onOpen(files, manifest.extensions?.[h.vendor]);
+        } catch (e) {
+          diags.push(pluginFailure(e, owner));
         }
       }
     }
@@ -926,7 +926,7 @@ export class KokoPack implements Observable {
     if (!identity) return new KokoErrors([diag('KF002', { level: 'error', params: { capability: 'synth.info' } })]);
     const signal = opts.signal;
     const fail = (e: unknown, plugin: string) =>
-      signal?.aborted ? new KokoErrors([diag('KF005', { level: 'error' })]) : new KokoErrors([diag('KF004', { params: { plugin, message: String(e) } })]);
+      signal?.aborted ? new KokoErrors([diag('KF005', { level: 'error' })]) : new KokoErrors([pluginFailure(e, plugin)]);
     // Oznacza błąd capability, z której pochodzi — KF004 wskazuje właściwy plugin.
     const via = async <T>(cap: 'g2p' | 'synth' | 'encoder', f: () => Promise<T>): Promise<T> => {
       try {
@@ -944,6 +944,16 @@ export class KokoPack implements Observable {
       const inputById = new Map(r.inputs.map((u) => [u.id, u]));
       const voiceOf = (u: Utterance) => identity.voice ?? u.params.voice;
       const cache = new Map<string, SynthResult>();
+      const synthCache = opts.cache === false ? undefined : cfg.cap('synthCache');
+      const progress = (e: ProgressEvent) => {
+        try {
+          opts.onProgress?.(e);
+        } catch {
+          // Słuchacz aplikacji nie może przerwać przebudowy.
+        }
+      };
+      const op: OperationOptions = { ...(signal ? { signal } : {}), onProgress: progress };
+      let measured = 0;
       let trackRate = 0;
       const synthesize = async (id: string, speed: number): Promise<SynthResult> => {
         const k = `${id}|${round4(speed)}`;
@@ -951,6 +961,21 @@ export class KokoPack implements Observable {
         if (hit) return hit;
         if (signal?.aborted) throw new Error('aborted');
         const u = byId.get(id)!;
+        // Cache syntezy (§2.12): adres = klucz wypowiedzi + prędkość.
+        const cacheKey = `${inputById.get(id)!.key}@${round4(speed)}`;
+        if (synthCache) {
+          try {
+            const c = await synthCache.get(cacheKey);
+            if (c && c.pcm instanceof Float32Array && c.sampleRate > 0) {
+              const out: SynthResult = { ...c, durationMs: Math.round((c.pcm.length * 1000) / c.sampleRate) };
+              if (!trackRate) trackRate = out.sampleRate;
+              cache.set(k, out);
+              return out;
+            }
+          } catch (e) {
+            cfg.logger.warn('synthCache.get nie powiódł się', { key: cacheKey, error: String(e) });
+          }
+        }
         const tokens = async (s: CanonicalSegment[]) => {
           let n = 0;
           for (const p of await via('g2p', () => g2p!.toIpa(s, lex))) n += await via('g2p', () => g2p!.tokenCount(p));
@@ -959,10 +984,17 @@ export class KokoPack implements Observable {
         const parts = await splitSegments(u.segments, tokens);
         const ipa: string[] = [];
         for (const p of parts) ipa.push(...(await via('g2p', () => g2p!.toIpa(p, lex))));
-        const res = await via('synth', () => synth!.synthesize({ ipa, voice: voiceOf(u), speed: round4(speed), gainDb: u.params.gain, ...(signal ? { signal } : {}) }));
+        const res = await via('synth', () => synth!.synthesize({ ipa, voice: voiceOf(u), speed: round4(speed), gainDb: u.params.gain, ...op }));
         if (!trackRate) trackRate = res.sampleRate;
         const out: SynthResult = { ...res, durationMs: Math.round((res.pcm.length * 1000) / res.sampleRate) };
         cache.set(k, out);
+        if (synthCache) {
+          try {
+            await synthCache.set(cacheKey, out);
+          } catch (e) {
+            cfg.logger.warn('synthCache.set nie powiódł się', { key: cacheKey, error: String(e) });
+          }
+        }
         return out;
       };
 
@@ -972,7 +1004,11 @@ export class KokoPack implements Observable {
       const total = r.inputs.length;
       const decisions = await reconcileTimeline(r.inputs, prev, r.settings, {
         ...(signal ? { signal } : {}),
-        measure: async (u, speed) => (await synthesize(u.id, speed)).durationMs,
+        measure: async (u, speed) => {
+          const d = (await synthesize(u.id, speed)).durationMs;
+          progress({ stage: 'measure', done: ++measured, utteranceId: u.id });
+          return d;
+        },
       });
       if (signal?.aborted) return new KokoErrors([diag('KF005', { level: 'error' })]);
 
@@ -982,7 +1018,9 @@ export class KokoPack implements Observable {
       const needsOld = decisions.some((d) => d.state === 'current' || d.state === 'moved');
       if (old && needsOld && encoder!.decode) {
         try {
-          const dec = await via('encoder', () => encoder!.decode!(old._blob, old._params.codec as 'mp3' | 'opus'));
+          progress({ stage: 'decode', done: 0, total: 1 });
+          const dec = await via('encoder', () => encoder!.decode!(old._blob, old._params.codec as 'mp3' | 'opus', op));
+          progress({ stage: 'decode', done: 1, total: 1 });
           oldPcm = dec.pcm;
           if (!trackRate) trackRate = dec.sampleRate;
         } catch {
@@ -1016,7 +1054,7 @@ export class KokoPack implements Observable {
           const res = await synthesize(d.id!, f.speed);
           place(f.t0, res.pcm, f.duration, u.gain);
           done++;
-          opts.onProgress?.(done, total, d.id!);
+          progress({ stage: 'synth', done, total, utteranceId: d.id! });
         }
       }
 
@@ -1052,7 +1090,7 @@ export class KokoPack implements Observable {
             const res = await spliceRange(b, index, { range: rg, encoderDelay: old!._params.encoderDelay, offset: old!._params.offset, sampleRate: sr, clips }, async (from, frames) => {
               const win = new Float32Array((frames + 4) * N);
               win.set(pcm.subarray(from, from + win.length));
-              return via('encoder', () => encoder!.mp3!(win, { sampleRate: sr, channels: 1, bitrateKbps: index.frames[0]!.bitrateKbps, cbr: true, noReservoir: true, rawFrames: true }));
+              return via('encoder', () => encoder!.mp3!(win, { sampleRate: sr, channels: 1, bitrateKbps: index.frames[0]!.bitrateKbps, cbr: true, noReservoir: true, rawFrames: true }, op));
             });
             if (res instanceof KokoErrors) {
               okSplice = false;
@@ -1070,12 +1108,16 @@ export class KokoPack implements Observable {
       if (!bytes) {
         if (codec === 'opus') {
           if (!encoder!.opus) return new KokoErrors([diag('KF002', { level: 'error', params: { capability: 'encoder.opus' } })]);
-          bytes = await via('encoder', () => encoder!.opus!(pcm, { sampleRate: sr, bitrateKbps: 40, channels: 1 }));
+          progress({ stage: 'encode', done: 0, total: 1 });
+          bytes = await via('encoder', () => encoder!.opus!(pcm, { sampleRate: sr, bitrateKbps: 40, channels: 1 }, op));
+          progress({ stage: 'encode', done: 1, total: 1 });
           const pr = probeAudio(bytes, 'opus');
           params = { codec: 'opus', sampleRate: 48000, channels: 1, bitrateMode: 'vbr', spliceable: false, encoderDelay: pr?.encoderDelay ?? 312, padding: 0, offset, duration: Math.round(totalMs) };
         } else {
           if (!encoder!.mp3) return new KokoErrors([diag('KF002', { level: 'error', params: { capability: 'encoder.mp3' } })]);
-          bytes = await via('encoder', () => encoder!.mp3!(pcm, { sampleRate: sr, channels: 1, bitrateKbps: chooseBitrate(sr), cbr: true, noReservoir: true }));
+          progress({ stage: 'encode', done: 0, total: 1 });
+          bytes = await via('encoder', () => encoder!.mp3!(pcm, { sampleRate: sr, channels: 1, bitrateKbps: chooseBitrate(sr), cbr: true, noReservoir: true }, op));
+          progress({ stage: 'encode', done: 1, total: 1 });
           const pr = probeAudio(bytes, 'mp3');
           spliceable = !!pr?.mp3 && checkSpliceable(pr.mp3, bytes).length === 0 && pr.mp3.encoderDelay !== undefined;
           params = {
@@ -1296,13 +1338,35 @@ export class KokoPack implements Observable {
 
     let signatures = this.#origManifestJcs === manJcs ? [...this.#signatures] : [];
     if (signers.length) {
-      const crypto = cfg.cap('crypto');
-      if (!crypto) return new KokoErrors([diag('KF002', { level: 'error', params: { capability: 'crypto' } })]);
       signatures = [];
+      const message = utf8(manJcs);
       for (const k of signers) {
-        const pub = k.publicKey ?? (await crypto.ed25519PublicKey?.(k.privateKey));
-        if (!pub) return new KokoErrors([diag('KF002', { level: 'error', params: { capability: 'crypto.ed25519PublicKey' } })]);
-        const sig = await crypto.ed25519Sign(utf8(manJcs), k.privateKey);
+        let pub: Uint8Array | undefined = k.publicKey;
+        let sig: Uint8Array;
+        if (k.privateKey) {
+          const crypto = cfg.cap('crypto');
+          if (!crypto) return new KokoErrors([diag('KF002', { level: 'error', params: { capability: 'crypto' } })]);
+          try {
+            pub ??= await crypto.ed25519PublicKey?.(k.privateKey);
+            if (!pub) return new KokoErrors([diag('KF002', { level: 'error', params: { capability: 'crypto.ed25519PublicKey' } })]);
+            sig = await crypto.ed25519Sign(message, k.privateKey);
+          } catch (e) {
+            return new KokoErrors([pluginFailure(e, cfg.capOwner('crypto'))]);
+          }
+        } else {
+          const signer = cfg.cap('signer');
+          if (!signer) return new KokoErrors([diag('KF002', { level: 'error', params: { capability: 'signer', keyId: k.keyId } })]);
+          try {
+            if (!pub) {
+              const info = (await signer.keys()).find((x) => x.keyId === k.keyId && (k.registry === undefined || x.registry === k.registry));
+              if (!info) return new KokoErrors([diag('KF002', { level: 'error', params: { capability: 'signer', keyId: k.keyId } })]);
+              pub = info.publicKey;
+            }
+            sig = await signer.sign(k.keyId, message);
+          } catch (e) {
+            return new KokoErrors([pluginFailure(e, cfg.capOwner('signer'))]);
+          }
+        }
         signatures.push({ alg: 'ed25519', keyId: k.keyId, ...(k.registry ? { registry: k.registry } : {}), publicKey: b64encode(pub), created: nowIso(), signature: b64encode(sig) });
       }
     }

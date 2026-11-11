@@ -46,6 +46,8 @@ export class DocCore {
   readonly parents: DocCore[] = [];
   readonly rx: ReactivityCapability | undefined;
   readonly createdAtConfigVersion: number;
+  /** Nadpisanie konfiguracji podane przy tworzeniu dokumentu. */
+  readonly call: CallConfig | undefined;
   doc: object;
   /** Wersja treści — rośnie przy każdej zmianie (unieważnia wartości pochodne). */
   version = 0;
@@ -58,6 +60,7 @@ export class DocCore {
 
   constructor(doc: object, call?: CallConfig) {
     this.doc = doc;
+    this.call = call;
     this.rx = resolveConfig(call).cap('reactivity');
     this.createdAtConfigVersion = configVersion();
     this.docAtom = this.atom('doc');
@@ -179,11 +182,14 @@ export class Derived<T> {
   private value: T | undefined;
   private valid = false;
   private computing = false;
+  private computedAt = -1;
 
   constructor(
     private readonly core: DocCore,
     private readonly compute: () => T,
     name?: string,
+    /** Przelicz także po zmianie konfiguracji (reguły, normalizatory pluginów). */
+    private readonly configBound = false,
   ) {
     this.atom = core.atom(name);
     core.registerDerived(this as Derived<unknown>);
@@ -191,10 +197,12 @@ export class Derived<T> {
 
   get(): T {
     this.atom.track();
+    if (this.valid && this.configBound && this.computedAt !== configVersion()) this.valid = false;
     if (!this.valid) {
       if (this.computing) throw new Error('Cykliczna zależność wartości pochodnej');
       this.computing = true;
       try {
+        this.computedAt = configVersion();
         this.value = this.core.untrack(this.compute);
         this.valid = true;
       } finally {

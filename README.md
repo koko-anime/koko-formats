@@ -4,7 +4,7 @@ Biblioteka TypeScript do odczytu, edycji i zapisu formatów projektu **Koko-Anim
 **Koko-ASS v1** (napisy z instrukcjami dla lektora), **Koko-Lexicon v1** (leksykon serii)
 i **Koko-Pack v1** (paczka napisów i ścieżki lektora).
 
-Wersja pakietu **0.3.0** — implementuje specyfikację API **0.2.0** (`Koko-Formats-API_v0`) z dodatkami opisanymi niżej.
+Wersja pakietu **0.4.0** — implementuje specyfikację API **0.4.0** (`Koko-Formats-API_v0`), w tym API pluginów 0.4.
 
 > Wersja 0.2.0 na npm to wcześniejsza implementacja z innym API (`/koko-ass`, `/koko-pack`, `/koko-lexicon`), dlatego ta biblioteka startuje od 0.3.0.
 
@@ -25,7 +25,7 @@ Adaptery frameworków są osobnymi bibliotekami (własne repozytoria i wersje):
 | `@koko-anime/adapters-solid` | `import { solid } from '@koko-anime/adapters-solid'` |
 | `@koko-anime/adapters-react` | `import { useKoko } from '@koko-anime/adapters-react'` (hook na `onChange`) |
 
-Adapter to zwykły plugin z capability `reactivity` — można też napisać własny (`definePlugin({ reactivity: { createAtom } })`).
+Adapter to zwykły plugin z capability `reactivity` — można też napisać własny (`definePlugin({ name, api: '0.4', reactivity: { createAtom } })`).
 
 Rdzeń nie zależy od żadnego środowiska ani frameworka. Działa w przeglądarce/WebView (WebKitGTK, WebView2), Node i Bun.
 
@@ -59,7 +59,7 @@ line.kk.say = 'Zbierają grzyby i się trują.';             // {!kk say="…"} 
 console.log(line.analysis.spokenText, ass.diagnostics);
 
 const pack = KokoPack.create({ subtitles: ass, title: 'Odcinek 27' });
-await pack.rebuild(undefined, { onProgress: (d, t) => (progress = d / t) });
+await pack.rebuild(undefined, { onProgress: (e) => { if (e.stage === 'synth') progress = e.done / (e.total ?? 1); } });
 const forViewers = await pack.toBlob({ profile: 'distribution' });
 ```
 
@@ -73,7 +73,9 @@ const forViewers = await pack.toBlob({ profile: 'distribution' });
 
 ## Pluginy
 
-Plugin to `definePlugin({ name, ...capability })`. Gdy kilka pluginów dostarcza tę samą capability, wygrywa **ostatni** na liście.
+Plugin to `definePlugin({ name, api: '0.4', ...capability })`. Plugin bez `api` działa jak 0.3 (ostrzeżenie KF007), z inną wersją jest pomijany (KF007).
+Capability **pojedyncze** — wygrywa **ostatni** plugin na liście. Capability **listowe** (`rules`, `normalizers`, `formats`, `packExtensions`) — sumowane; ten sam identyfikator w dwóch pluginach → KF011, wygrywa ostatni.
+Plugin o nazwie już zarejestrowanej w `defineConfig` zastępuje poprzedni.
 
 | Capability | Do czego |
 | --- | --- |
@@ -84,7 +86,15 @@ Plugin to `definePlugin({ name, ...capability })`. Gdy kilka pluginów dostarcza
 | `crypto` | `sha256` (synchroniczne), Ed25519 — gotowy plugin: `nobleCrypto()` |
 | `fetch`, `registryCache` | rejestr twórców (PACK §8.2) |
 | `reactivity` | `createAtom` (+ `batch`, `untrack`) — adaptery frameworków |
-| `packExtensions` | obsługa katalogów `x-<dostawca>/` |
+| `logger` | ujście logów biblioteki i pluginów (domyślnie cisza) |
+| `synthCache` | trwały cache PCM, klucz `<klucz wypowiedzi>@<prędkość>`; trafienie = brak wywołania `synth` |
+| `signer` | podpis Ed25519 bez klucza prywatnego w bibliotece (`toBlob({ sign: { keyId } })`) |
+| `rules` (listowa) | reguły `X:<dostawca>/<reguła>` per linia lub per dokument; wyłączanie: `defineConfig({ rules: { 'X:…': 'off' } })` |
+| `normalizers` (listowa) | etapy normalizacji tekstu mówionego przed leksykonem (liczby = `koko/numbers-pl`, order 500); `opt-in` włączane przez `defineConfig({ normalizers: { id: 'on' } })` |
+| `formats` (listowa) | import/eksport: `KokoAss.import(format, input)`, `doc.export(format)`, `listFormats()`, `sniffFormat()`; wbudowany `ass` |
+| `packExtensions` (listowa) | obsługa katalogów `x-<dostawca>/` |
+
+**Cykl życia:** `setup(ctx)` uruchamia się leniwie przy pierwszym wywołaniu asynchronicznej capability pluginu (raz); `preparePlugins(['synth'])` wymusza go z góry. Błąd → KF008, capability pluginu znikają do `retryPlugin(name)`. `dispose()` — przy `resetConfig()`, `disposePlugins()` i zastąpieniu pluginu. Metody synchroniczne (`crypto.sha256`, `fs.resolve`, `reactivity`, `logger`, reguły, normalizatory) nie czekają na `setup`.
 
 Nadpisanie dla jednego wywołania: zwykły obiekt, nie `defineConfig`:
 `KokoPack.open(blob, { mode: 'play', config: { plugins: [], replacePlugins: true } })`.
@@ -104,7 +114,7 @@ Dokumentacja API powstaje z komentarzy TSDoc w kodzie (po polsku). Elementy ozna
 
 Testy Koko-Pack i `/mp3` używają `ffmpeg` z libmp3lame i libopus (kodowanie/dekodowanie prawdziwych plików).
 
-Do rozwijania adapterów przed publikacją 0.3.0: `bun run build && bun link` w tym repo, a w repo adaptera `bun link @koko-anime/formats`.
+Do rozwijania adapterów przed publikacją: `bun run build && bun link` w tym repo, a w repo adaptera `bun link @koko-anime/formats`.
 
 ## Decyzje implementacyjne (do potwierdzenia w specyfikacji)
 
@@ -121,11 +131,11 @@ Miejsca, w których specyfikacja zostawiała swobodę albo w których implementa
 9. **KP012** sprawdzane bez dekodowania: MP3 z nagłówka Info/LAME, Opus z OpusHead i ostatniej pozycji granule.
 10. **Case folding:** `lower(upper(c))` dla odwzorowań 1:1 + wyjątek Cherokee; zgodne ze statusami C+S z `CaseFolding.txt` dla polskiego i łacińskiego, do potwierdzenia golden testami dla rzadkich skryptów.
 11. **`SkipIfMatch`:** podzbiór jest walidowany, ale wykonuje go silnik RegExp JS (bez gwarancji czasu liniowego).
-12. **Adaptery** są osobnymi bibliotekami `@koko-anime/adapters-*` (specyfikacja API 0.2.0 nazywa je `@koko-anime/formats-*`).
-13. **Wersja pakietu 0.3.0** zamiast 0.2.0 — kolizja z opublikowaną wcześniej wersją 0.2.0 o innym API.
-14. **Dodatki do API** względem specyfikacji 0.2.0: `SynthCapability.info()`, `CryptoCapability.ed25519PublicKey()`, `KokoPack.create/setCache/setExtensionFile/dirty/matchVideo`, `videoFingerprint()`, `AudioTrack.fromPlaybackSeconds()`, `EventList.shift()`, `Utterance.parts`, `KokoAss.settings/resolvedLexicon`, kody KF001–KF006.
+12. **Normalizatory pluginów** zmieniają segmenty kanoniczne, a więc klucze wypowiedzi; wersje etapów nie wchodzą do klucza (Dodatek A, pytanie 1). Etapy `opt-in` włącza konfiguracja aplikacji, nie plik `.ass` (czeka na zmianę Koko-ASS). Ten sam wynik w TS i Rust jest gwarantowany tylko bez normalizatorów pluginów.
+13. **Język normalizacji** = `pl` (Koko-ASS v1 nie ma klucza języka).
+14. **Cache syntezy** jest adresowany `<utteranceKey>@<speed>`, bo dopasowanie (ASS §4.6) syntezuje tę samą wypowiedź z różnymi prędkościami.
 
-## Ograniczenia v0.2.0
+## Ograniczenia
 
 - Tryb `play` nie blokuje edycji `pack.subtitles` (tylko pomija kontrole edycyjne).
 - `loudness` nie jest liczona przy przebudowie.

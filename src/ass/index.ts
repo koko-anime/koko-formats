@@ -16,8 +16,8 @@
  *
  * @module @koko-anime/formats/ass
  */
-export { KokoAss, EventList, Utterance, KOKO_ASS_VERSION, TOKEN_LIMIT } from './koko-ass.ts';
-export type { AssParseOptions, AssLoadOptions, CheckOptions } from './koko-ass.ts';
+export { KokoAss, EventList, Utterance, KOKO_ASS_VERSION, TOKEN_LIMIT, listFormats, sniffFormat } from './koko-ass.ts';
+export type { AssParseOptions, AssLoadOptions, CheckOptions, FormatOptions } from './koko-ass.ts';
 export {
   AssEvent,
   AssStyle,
@@ -35,7 +35,7 @@ export {
 } from './model.ts';
 export type { AssEventData, EventType, KkRange, KkPause, KokoSections, RawSection, SourceData } from './model.ts';
 export type { LektorKeys, RulesKeys } from './settings.ts';
-export type { LineAnalysis, SkipReason, UtteranceParams, SynthesisIdentity, EffectiveSettings } from './analysis.ts';
+export type { LineAnalysis, LineReplacement, SkipReason, UtteranceParams, SynthesisIdentity, EffectiveSettings } from './analysis.ts';
 export { canonicalSegments, segmentsText, utteranceKey } from './analysis.ts';
 export { formatAssTime, parseAssTime } from './time.ts';
 export { KokoErrors } from '../core/errors.ts';
