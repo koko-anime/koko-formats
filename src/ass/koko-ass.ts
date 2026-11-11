@@ -9,6 +9,7 @@ import { ItemCollection, type Collection } from '../core/collections.ts';
 import type { AssRule, Atom, CanonicalSegment, FormatCodec, FormatInfo, OperationOptions, ResolvedLexicon, RuleLineView, RuleReport, RuleSettings } from '../core/plugin-types.ts';
 import { foldCase, nfc } from '../core/text.ts';
 import { KokoLexicon, flattenLines } from '../lexicon/lexicon.ts';
+import { formatInlineTable, parseInlineTable, validateEntryTable } from '../lexicon/entry.ts';
 import {
   analyze,
   extensionDiag,
@@ -511,24 +512,8 @@ export class KokoAss implements Observable, AssOwner {
         }
       } else if (name === 'koko lexicon') {
         for (const { text: l, line } of sec.lines) {
-          if (!l.trim()) continue;
-          if (l.trimStart().startsWith(';')) {
-            const it = new EpisodeLexiconItem(doc, 'comment', { text: l.trimStart().slice(1).trim() });
-            it.sourceLine = line;
-            doc.koko.lexicon.items.push(it);
-            continue;
-          }
-          const eq = l.indexOf('=');
-          const keyRaw = eq < 0 ? '' : l.slice(0, eq).trim();
-          const value = eq < 0 ? '' : l.slice(eq + 1).trim();
-          if (eq < 0 || !keyRaw.replace(/\*$/, '').trim() || !value || value === '~') {
-            diags.push(diag('KK006', { position: pos(line), params: { line: l.trim() } }));
-            continue;
-          }
-          const stem = keyRaw.endsWith('*');
-          const it = new EpisodeLexiconItem(doc, 'entry', { key: keyRaw.replace(/\*$/, '').trim(), stem, value });
-          it.sourceLine = line;
-          doc.koko.lexicon.items.push(it);
+          const it = parseLexiconLine(doc, l, line, diags);
+          if (it) doc.koko.lexicon.items.push(it);
         }
         markFlattened(doc.koko.lexicon.items);
       } else if (name === 'koko sources') {
@@ -634,16 +619,12 @@ export class KokoAss implements Observable, AssOwner {
     if (!lx) return false;
     this._core.batch('flattenSeriesLexicon', () => {
       const items = this.koko.lexicon.items.filter((i) => !i._flattened);
-      const episodeKeys = items.filter((i) => i.kind === 'entry').map((i) => i._key);
-      const lines = flattenLines(lx.effectiveEntries(), episodeKeys);
+      const episodeWords = items.filter((i) => i.kind === 'entry').flatMap(entryWords);
+      const lines = flattenLines(lx.effectiveEntries(), episodeWords);
       const flat: EpisodeLexiconItem[] = [];
       for (const l of lines) {
-        if (l.startsWith(';')) flat.push(new EpisodeLexiconItem(this, 'comment', { text: l.slice(1).trim() }));
-        else {
-          const eq = l.indexOf(' = ');
-          const k = l.slice(0, eq);
-          flat.push(new EpisodeLexiconItem(this, 'entry', { key: k.replace(/\*$/, ''), stem: k.endsWith('*'), value: l.slice(eq + 3) }));
-        }
+        const it = parseLexiconLine(this, l, 0, []);
+        if (it) flat.push(it);
       }
       for (const f of flat) f._flattened = true;
       this.koko.lexicon.items = [...items, ...flat];
@@ -653,6 +634,18 @@ export class KokoAss implements Observable, AssOwner {
       this._globalChanged([this.koko.lexicon.atom, this.#seriesAtom], null, ['koko', 'lexicon'], 'replace');
     });
     return true;
+  }
+
+  /**
+   * Odtwarza leksykon serii z bloku spłaszczonego (Koko-Lexicon §3.1) — bez `title`, które przepada.
+   * `null`, gdy bloku nie ma (albo jest niezamknięty lub powtórzony).
+   */
+  extractSeriesLexicon(): KokoLexicon | null {
+    const flat = this.koko.lexicon.items.filter((i) => i._flattened && i.kind === 'entry');
+    if (!this.koko.lexicon.items.some((i) => i._flattened)) return null;
+    const lx = KokoLexicon.create(this._core.call ? { config: this._core.call } : {});
+    for (const it of flat) lx.entries.add(it._key, it.toEntry());
+    return lx;
   }
 
   /** Cofa spłaszczenie (Koko-Lexicon §3.1). false, gdy blok niezamknięty, powtórzony albo go brak. */
@@ -681,7 +674,7 @@ export class KokoAss implements Observable, AssOwner {
       lektor: this.koko.lektor.items.filter((i) => i.kind === 'pair').map((i) => ({ id: i.id, key: i.key, raw: i.raw })),
       rules: this.koko.rules.items.filter((i) => i.kind === 'pair').map((i) => ({ id: i.id, key: i.key, raw: i.raw })),
       styles: this.koko.styles.items.map((r) => ({ id: r.id, pattern: r._pattern, skip: r._skip, params: r.params.map((p) => ({ ...p })) })),
-      lexicon: this.koko.lexicon.items.filter((i) => i.kind === 'entry').map((i) => ({ id: i.id, key: i._key, stem: i._stem, value: i._value })),
+      lexicon: this.koko.lexicon.items.filter((i) => i.kind === 'entry').map((i) => ({ id: i.id, key: i._key, stem: i._stem, value: i._value, aliases: [...i._aliases], forms: i._forms.map(([k, v]) => [k, v] as [string, string]) })),
       series: this.#series ? this.#series._effectiveRaw() : null,
       ...this.#pluginInputs(),
     };
@@ -753,12 +746,18 @@ export class KokoAss implements Observable, AssOwner {
       if (/^koko /i.test(sec.name)) out.push(diag('KK001', { targetId: sec.id, params: { section: sec.name } }));
     }
     // Duplikaty leksykonu (KK010)
+    // Słowo (klucz, alias, forma) w kilku wpisach — obowiązuje ostatnie wystąpienie (Koko-ASS §2).
     const seen = new Map<string, EpisodeLexiconItem>();
     for (const it of this.koko.lexicon.items) {
       if (it.kind !== 'entry') continue;
-      const f = foldCase(it._key);
-      if (seen.has(f)) out.push(diag('KK010', { targetId: it.id, params: { key: it._key }, ...at(it.sourceLine) }));
-      seen.set(f, it);
+      const dup = new Set<string>();
+      for (const w of entryWords(it)) {
+        const f = foldCase(w);
+        const prev = seen.get(f);
+        if (prev && prev !== it) dup.add(w);
+        seen.set(f, it);
+      }
+      for (const w of dup) out.push(diag('KK010', { targetId: it.id, params: { key: it._key, word: w }, ...at(it.sourceLine) }));
     }
     // Źródła (KK007, KK010)
     const labels = new Set<string>();
@@ -813,7 +812,7 @@ export class KokoAss implements Observable, AssOwner {
       const bad = (ipa: string) => [...ipa].filter((c) => !/\s/u.test(c) && !vocab.has(c));
       for (const it of this.koko.lexicon.items) {
         if (it.kind === 'entry' && !it._value.startsWith('~')) {
-          const b = bad(it._value);
+          const b = [it._value, ...it._forms.map(([, v]) => v)].flatMap(bad);
           if (b.length) extra.push(diag('KK101', { targetId: it.id, params: { key: it._key, symbols: [...new Set(b)].join(' ') }, ...(it.sourceLine ? { position: { line: it.sourceLine, column: 1 } } : {}) }));
         }
       }
@@ -941,7 +940,9 @@ export class KokoAss implements Observable, AssOwner {
     if (this.koko.lexicon.items.length) {
       L.push('', '[Koko Lexicon]');
       for (const it of this.koko.lexicon.items) {
-        L.push(it.kind === 'comment' ? `; ${it._text}`.trimEnd() : `${it._key}${it._stem ? '*' : ''} = ${it._value}`);
+        if (it.kind === 'comment') L.push(`; ${it._text}`.trimEnd());
+        else if (it._form === 'full') L.push(`${it._key} = ${formatInlineTable(it._shape())}`);
+        else L.push(`${it._key}${it._stem ? '*' : ''} = ${it._value}`);
       }
     }
     if (this.koko.sources.items.length) {
@@ -1056,6 +1057,52 @@ export function sniffFormat(head: string, opts: { config?: CallConfig } = {}): s
     }
   }
   return undefined;
+}
+
+/** Słowa wpisu `[Koko Lexicon]`: klucz, aliasy, formy. */
+function entryWords(it: EpisodeLexiconItem): string[] {
+  return [it._key, ...it._aliases, ...it._forms.map(([k]) => k)];
+}
+
+/**
+ * Linia `[Koko Lexicon]` (Koko-ASS §2): komentarz, forma prosta albo pełna (wartość od `{` = tabela TOML w jednej linii).
+ * Błędy formy pełnej → kody KL z pozycją w pliku `.ass`; KL001 pomija tylko ten wpis.
+ */
+function parseLexiconLine(doc: KokoAss, l: string, line: number, diags: Diagnostic[]): EpisodeLexiconItem | null {
+  if (!l.trim()) return null;
+  const at = (column: number) => (line ? { position: { line, column } } : {});
+  if (l.trimStart().startsWith(';')) {
+    const it = new EpisodeLexiconItem(doc, 'comment', { text: l.trimStart().slice(1).trim() });
+    if (line) it.sourceLine = line;
+    return it;
+  }
+  const eq = l.indexOf('=');
+  const keyRaw = eq < 0 ? '' : l.slice(0, eq).trim();
+  const value = eq < 0 ? '' : l.slice(eq + 1).trim();
+  if (eq < 0 || !keyRaw.replace(/\*$/, '').trim() || !value || value === '~') {
+    diags.push(diag('KK006', { ...at(1), params: { line: l.trim() } }));
+    return null;
+  }
+  let it: EpisodeLexiconItem;
+  if (value.startsWith('{')) {
+    const valueCol = eq + 1 + (l.slice(eq + 1).length - l.slice(eq + 1).trimStart().length) + 1;
+    if (keyRaw.endsWith('*')) {
+      diags.push(diag('KL004', { ...at(1), params: { key: keyRaw, reason: 'star-in-full-form' } }));
+      return null;
+    }
+    const r = parseInlineTable(value);
+    if ('error' in r) {
+      diags.push(diag('KL001', { ...at(valueCol + r.column - 1), params: { key: keyRaw, message: r.error } }));
+      return null;
+    }
+    const shape = validateEntryTable(keyRaw, r.table, (code, params) => diags.push(diag(code, { ...at(valueCol), params })));
+    if (!shape) return null;
+    it = new EpisodeLexiconItem(doc, 'entry', { key: keyRaw, full: shape });
+  } else {
+    it = new EpisodeLexiconItem(doc, 'entry', { key: keyRaw.replace(/\*$/, '').trim(), stem: keyRaw.endsWith('*'), value });
+  }
+  if (line) it.sourceLine = line;
+  return it;
 }
 
 /** Oznacza blok spłaszczonego leksykonu (dokładnie jeden begin przed jednym end). */

@@ -56,6 +56,7 @@ export const ManifestSchema = type({
   subtitles: { path: 'string', sha256: Hash, kokoVersion: 'number | null' },
   audio: AudioEntrySchema.array(),
   timeline: { path: 'string', sha256: Hash },
+  'fonts?': type({ path: 'string', sha256: Hash }).array(),
   'synthesis?': SynthesisSchema,
   'video?': VideoSchema,
   'extensions?': 'Record<string, unknown>',

@@ -136,10 +136,14 @@ stem = true
     expect(doc.utterances[1]!.segments).toEqual([{ t: 'text', s: 'konkubiny Dżin i Lakanowi.' }]);
     expect(doc.flattenSeriesLexicon()).toBe(true);
     const out = doc.toString();
-    expect(out).toContain('[Koko Lexicon]\nJinshi = dʑinɕi\nGyokuyou* = ~Giokujo\n; @koko-lexicon-begin\nKonkubina Jin = ~konkubina Dżin\nKonkubiny Jin = ~konkubiny Dżin\nLakan* = ~Lakan\n; @koko-lexicon-end');
+    expect(out).toContain('[Koko Lexicon]\nJinshi = dʑinɕi\nGyokuyou* = ~Giokujo\n; @koko-lexicon-begin\nKonkubina Jin = { respell = "konkubina Dżin", forms = { "Konkubiny Jin" = "konkubiny Dżin" } }\nLakan* = ~Lakan\n; @koko-lexicon-end');
     expect(out).toContain('SeriesLexicon = none');
     const again = load(out);
-    expect(again.koko.lexicon.toArray().filter((i) => i.flattened).length).toBe(5);
+    expect(again.koko.lexicon.toArray().filter((i) => i.flattened).length).toBe(4);
+    expect(again.utterances[1]!.text).toBe('konkubiny Dżin i Lakanowi.');
+    const restored = again.extractSeriesLexicon()!;
+    expect(restored.flatten()).toBe('; @koko-lexicon-begin\nKonkubina Jin = { respell = "konkubina Dżin", forms = { "Konkubiny Jin" = "konkubiny Dżin" } }\nLakan* = ~Lakan\n; @koko-lexicon-end');
+    expect(restored.entries.get('Konkubiny Jin')?.key).toBe('Konkubina Jin');
     expect(again.unflattenSeriesLexicon()).toBe(true);
     expect(again.toString()).not.toContain('@koko-lexicon');
   });

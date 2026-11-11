@@ -46,7 +46,12 @@ export interface EpisodeLexiconInput {
   id: string;
   key: string;
   stem: boolean;
+  /** IPA albo `~pisownia`. */
   value: string;
+  /** Aliasy (forma pełna) — ta sama wymowa i `stem`. */
+  aliases?: readonly string[];
+  /** Formy z własną wymową (tego samego rodzaju co wpis), bez `stem`. */
+  forms?: readonly (readonly [string, string])[];
 }
 
 /** @internal */
@@ -435,14 +440,25 @@ function buildPatterns(lex: ResolvedLexiconEntry[]): LexPattern[] {
 
 /** @internal Leksykon odcinka + serii (wpisy serii pokrywające się z kluczem odcinka są pomijane w całości). */
 export function resolveLexicon(episode: readonly EpisodeLexiconInput[], series: readonly EffectiveLexiconEntry[] | null): ResolvedLexiconEntry[] {
-  // Ostatni wpis odcinka o danym kluczu wygrywa (KK010).
-  const byKey = new Map<string, EpisodeLexiconInput>();
-  for (const e of episode) byKey.set(foldCase(e.key), e);
-  const out: ResolvedLexiconEntry[] = [];
-  for (const e of byKey.values()) {
+  // Wpis odcinka rozwija się do słów (klucz, aliasy, formy); to samo słowo w kilku wpisach —
+  // obowiązuje ostatnie wystąpienie w pliku (KK010, Koko-ASS §2).
+  const byKey = new Map<string, ResolvedLexiconEntry>();
+  for (const e of episode) {
     const respell = e.value.startsWith('~');
-    out.push({ key: e.key, stem: e.stem, kind: respell ? 'respell' : 'ipa', value: respell ? e.value.slice(1) : e.value, origin: 'episode' });
+    const kind: 'ipa' | 'respell' = respell ? 'respell' : 'ipa';
+    const value = respell ? e.value.slice(1) : e.value;
+    const words: ResolvedLexiconEntry[] = [
+      { key: e.key, stem: e.stem, kind, value, origin: 'episode' },
+      ...(e.aliases ?? []).map((a) => ({ key: a, stem: e.stem, kind, value, origin: 'episode' as const })),
+      ...(e.forms ?? []).map(([k, v]) => ({ key: k, stem: false, kind, value: v, origin: 'episode' as const })),
+    ];
+    for (const w of words) {
+      const f = foldCase(w.key);
+      byKey.delete(f);
+      byKey.set(f, w);
+    }
   }
+  const out: ResolvedLexiconEntry[] = [...byKey.values()];
   if (series) {
     for (const s of series) {
       const words = [s.key, ...s.aliases, ...s.forms.map(([k]) => k)];

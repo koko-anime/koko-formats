@@ -8,12 +8,13 @@ import { DocCore, markRaw, type ChangeListener, type Observable } from '../core/
 import { KokoErrors } from '../core/errors.ts';
 import { jcs, round4, sha256Blob, sha256Tag, sha256Bytes } from '../core/hash.ts';
 import type { Atom, CanonicalSegment, OperationOptions, ProgressEvent, SynthesisInfo, SynthResult } from '../core/plugin-types.ts';
-import { fromUtf8, nfc, utf8 } from '../core/text.ts';
+import { compareCodePoints, fromUtf8, nfc, utf8 } from '../core/text.ts';
 import { KokoAss, TOKEN_LIMIT, type Utterance } from '../ass/koko-ass.ts';
 import { NUMBERS_RULES_VERSION } from '../numbers/expand.ts';
 import { checkSpliceable, indexFramesSync, spliceRange } from '../mp3/mp3.ts';
 import { reconcileTimeline, type FitSettings, type ReconcileDecision, type ReconcileInput, type TimelineUtterance } from '../timing/timing.ts';
 import { probeAudio } from './audio-info.ts';
+import { fontNameKeys, isFontFileName, readFontNames, type FontNames } from './fonts.ts';
 import {
   ManifestSchema,
   RegistryResponseSchema,
@@ -189,6 +190,7 @@ function validPath(name: string): boolean {
   if (/^[A-Za-z]:/.test(name)) return false;
   const top = parts[0]!;
   if (parts.length === 1 && !name.endsWith('/')) return ROOT_FILES.has(top);
+  if (top === 'fonts') return name === 'fonts/' || (parts.length === 2 && !name.endsWith('/') && isFontFileName(parts[1]!));
   return top === 'audio' || top === 'cache' || /^x-[a-z0-9][a-z0-9-]*$/i.test(top);
 }
 
@@ -220,7 +222,7 @@ function orderAudio(a: AudioEntryJson): AudioEntryJson {
 
 function orderManifest(m: ManifestJson): ManifestJson {
   const o: Record<string, unknown> = {};
-  for (const k of ['format', 'version', 'created', 'modified', 'generator', 'profile', 'title', 'subtitles', 'audio', 'timeline', 'synthesis', 'video', 'extensions'] as const)
+  for (const k of ['format', 'version', 'created', 'modified', 'generator', 'profile', 'title', 'subtitles', 'audio', 'timeline', 'fonts', 'synthesis', 'video', 'extensions'] as const)
     if (m[k] !== undefined) o[k] = k === 'audio' ? m.audio.map(orderAudio) : m[k];
   return o as unknown as ManifestJson;
 }
@@ -482,6 +484,7 @@ export class KokoPack implements Observable {
   #subtitlesDirty = false;
   #audio: AudioTrack | null = null;
   #cache = new Map<string, Blob>();
+  #fonts = new Map<string, { blob: Blob; names: FontNames }>();
   #extensions = new Map<string, Map<string, Blob>>();
   #signatures: SignatureJson[] = [];
   #origManifestJcs: string | null = null;
@@ -736,6 +739,33 @@ export class KokoPack implements Observable {
       if (!pack._timelineValid) pack.#stale = true;
     }
 
+    // Czcionki (PACK §3.1): każdy plik w manifeście i odwrotnie; błąd pomija tylko daną czcionkę.
+    const listedFonts = new Map((manifest.fonts ?? []).map((f) => [f.path, f.sha256]));
+    const fontEntries = z.entries.filter((e) => !e.isDirectory && e.name.startsWith('fonts/')).sort((x, y) => compareCodePoints(x.name, y.name));
+    for (const e of fontEntries) if (!listedFonts.has(e.name)) return reject(diag('KP007', { params: { path: e.name, reason: 'font-not-in-manifest' } }));
+    for (const p of listedFonts.keys()) if (!byName.has(p)) diags.push(diag('KP004', { params: { path: p } }));
+    let fontsTotal = 0;
+    for (const e of fontEntries) {
+      const name = e.name.slice(6);
+      if (pack.#fonts.size >= limits.fontsMaxCount || e.size > limits.fontMaxBytes || fontsTotal + e.size > limits.fontsMaxTotalBytes) {
+        diags.push(diag('KP020', { params: { path: e.name, reason: 'limit' } }));
+        continue;
+      }
+      const b = await entryBlob(blob, e, limits.fontMaxBytes);
+      const bytes = b ? new Uint8Array(await b.arrayBuffer()) : null;
+      if (!b || !bytes || sha256Tag(bytes, opts.config) !== listedFonts.get(e.name)) {
+        diags.push(diag('KP020', { params: { path: e.name, reason: 'sha256' } }));
+        continue;
+      }
+      const names = readFontNames(bytes);
+      if (!names) {
+        diags.push(diag('KP020', { params: { path: e.name, reason: 'not-a-font' } }));
+        continue;
+      }
+      fontsTotal += e.size;
+      pack.#fonts.set(name, { blob: b, names });
+    }
+
     // cache/ i rozszerzenia
     for (const e of z.entries) {
       if (e.isDirectory) continue;
@@ -781,6 +811,60 @@ export class KokoPack implements Observable {
     this._audioAtom.track();
     return this.#audio;
   }
+  /** Czcionki z `fonts/` (nazwa pliku → plik); tylko poprawne (KP020 pomija błędne). */
+  get fonts(): ReadonlyMap<string, Blob> {
+    this._manifestAtom.track();
+    return new Map([...this.#fonts].map(([k, v]) => [k, v.blob]));
+  }
+
+  /** Nazwy kroju czcionki z paczki (tabela `name`) — po nich renderer dopasowuje `Fontname` i `\fn`. */
+  fontNames(file: string): FontNames | undefined {
+    this._manifestAtom.track();
+    return this.#fonts.get(file)?.names;
+  }
+
+  /**
+   * Dodaje/zastępuje (`blob`) albo usuwa (`undefined`) czcionkę `fonts/<file>` (Koko-Pack §3.1).
+   * Zła nazwa (KP007) albo plik, który nie jest czcionką (KP020) → `KokoErrors`.
+   */
+  async setFont(file: string, blob: Blob | undefined): Promise<void | KokoErrors> {
+    if (!blob) {
+      if (this.#fonts.delete(file)) {
+        this._manifestAtom.trigger();
+        this._markDirty(['fonts', file]);
+      }
+      return;
+    }
+    if (!isFontFileName(file) || file !== nfc(file)) return new KokoErrors([diag('KP007', { level: 'error', params: { path: `fonts/${file}`, reason: 'font-name' } })]);
+    const limits = resolveConfig().limits;
+    if (blob.size > limits.fontMaxBytes) return new KokoErrors([diag('KP020', { level: 'error', params: { path: `fonts/${file}`, reason: 'limit' } })]);
+    const names = readFontNames(new Uint8Array(await blob.arrayBuffer()));
+    if (!names) return new KokoErrors([diag('KP020', { level: 'error', params: { path: `fonts/${file}`, reason: 'not-a-font' } })]);
+    this.#fonts.set(file, { blob, names });
+    this._manifestAtom.trigger();
+    this._markDirty(['fonts', file]);
+  }
+
+  /**
+   * Kroje użyte w napisach (`Fontname` stylów linii `Dialogue` i `\fn`), których nie ma w `fonts/` → KP021 (info).
+   * Porównanie z nazwami z plików czcionek, bez rozróżniania wielkości liter; wiodące `@` (pionowe) pomijane.
+   */
+  checkFonts(): readonly Diagnostic[] {
+    const have = new Set([...this.#fonts.values()].flatMap((f) => fontNameKeys(f.names)));
+    const used = new Map<string, string>();
+    const add = (n: string) => {
+      const name = n.trim().replace(/^@/, '');
+      if (name) used.set(name.toLowerCase(), used.get(name.toLowerCase()) ?? name);
+    };
+    const styles = new Set<string>();
+    for (const e of this.#subtitles.events.dialogues) {
+      styles.add(e.style.replace(/^\*/, ''));
+      for (const m of e.text.matchAll(/\{[^}]*\}/g)) for (const t of m[0].matchAll(/\\fn([^\\}]*)/g)) add(t[1]!);
+    }
+    for (const st of this.#subtitles.styles) if (styles.has(st.name)) add(st.get('Fontname') ?? '');
+    return Object.freeze([...used].filter(([k]) => !have.has(k)).map(([, n]) => diag('KP021', { params: { font: n } })));
+  }
+
   /** Pliki `cache/` (ścieżki względne; tylko profil `full`). */
   get cache(): ReadonlyMap<string, Blob> {
     this._manifestAtom.track();
@@ -1326,13 +1410,17 @@ export class KokoPack implements Observable {
         : { ...this._timeline, utterances: this._timeline.utterances.map((u) => orderUtterance(u as TimelineUtterance)) };
     const tlBytes = utf8(canonicalJson(tl));
     const a = this.#audio;
+    const fontEntries: { path: string; sha256: string; blob: Blob }[] = [];
+    for (const [file, f] of [...this.#fonts].sort(([x], [y]) => compareCodePoints(x, y)))
+      fontEntries.push({ path: `fonts/${file}`, sha256: sha256Tag(new Uint8Array(await f.blob.arrayBuffer()), opts.config), blob: f.blob });
     const manifest = orderManifest({
       ...structuredClone(this._manifest),
       profile,
       subtitles: { path: 'subtitles.ass', sha256: sha256Tag(subBytes, opts.config), kokoVersion: this.#subtitles.scriptInfo.kokoVersion },
       audio: [{ id: 'lektor', path: a._path, role: 'lektor', ...a._params, sha256: a._sha256 }],
       timeline: { path: 'timeline.json', sha256: sha256Tag(tlBytes, opts.config) },
-    });
+      fonts: fontEntries.length ? fontEntries.map((f) => ({ path: f.path, sha256: f.sha256 })) : undefined,
+    } as ManifestJson);
     const manBytes = utf8(canonicalJson(manifest));
     const manJcs = jcs(manifest);
 
@@ -1378,6 +1466,7 @@ export class KokoPack implements Observable {
       { name: a._path, data: a._blob, method: 'store' },
       { name: 'timeline.json', data: tlBytes, method: 'deflate' },
     ];
+    for (const f of fontEntries) entries.push({ name: f.path, data: f.blob, method: 'deflate' });
     if (signatures.length) entries.push({ name: 'signatures.json', data: utf8(canonicalJson({ version: 1, signatures })), method: 'deflate' });
     if (profile === 'full') for (const [p, b] of [...this.#cache].sort(([x], [y]) => (x < y ? -1 : 1))) entries.push({ name: `cache/${p}`, data: b, method: 'deflate' });
     for (const [vendor, files] of [...this.#extensions].sort(([x], [y]) => (x < y ? -1 : 1)))

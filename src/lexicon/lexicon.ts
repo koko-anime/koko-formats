@@ -2,6 +2,7 @@
  * Koko-Lexicon v1 — `KokoLexicon` (specyfikacja API §5, Koko-Lexicon §1–§4).
  */
 import { parse as parseToml, TomlError } from 'smol-toml';
+import { formatEntryLine, isValidLexiconWord, tomlKey, tomlString, validateEntryTable } from './entry.ts';
 import { resolveConfig, type CallConfig } from '../core/config-store.ts';
 import { diag, type Diagnostic } from '../core/diagnostics.ts';
 import { Derived, DocCore, markRaw, newId, type ChangeListener, type Observable } from '../core/doc-core.ts';
@@ -55,12 +56,8 @@ export interface EffectiveLexiconEntry {
 }
 
 const KNOWN_TOP = new Set(['format', 'version', 'title', 'entries']);
-const KNOWN_ENTRY = new Set(['ipa', 'respell', 'stem', 'aliases', 'forms', 'note', 'verified']);
 
-/** Klucze, aliasy, formy: niepuste, bez `= ; * [ ]`, bez wiodącego `~` (KL004). */
-export function isValidLexiconWord(w: string): boolean {
-  return w.trim().length > 0 && !/[=;*[\]]/.test(w) && !w.startsWith('~') && !/[\r\n]/.test(w);
-}
+export { isValidLexiconWord };
 
 /** Wpis leksykonu serii (`[entries.<klucz>]`). */
 export class LexiconEntry {
@@ -329,57 +326,16 @@ export class KokoLexicon implements Observable {
         diags.push(diag('KL004', { params: { key, reason: 'key' } }));
         continue;
       }
-      if (typeof v !== 'object' || v === null || Array.isArray(v)) {
-        diags.push(diag('KL004', { params: { key, reason: 'type' } }));
-        continue;
-      }
-      const e = v as Record<string, unknown>;
-      for (const f of Object.keys(e)) if (!KNOWN_ENTRY.has(f)) diags.push(diag('KL003', { params: { key, field: f } }));
-      const hasIpa = 'ipa' in e;
-      const hasRespell = 'respell' in e;
-      if (hasIpa === hasRespell) {
-        diags.push(diag('KL004', { params: { key, reason: 'ipa/respell' } }));
-        continue;
-      }
-      const value = hasIpa ? e.ipa : e.respell;
-      if (typeof value !== 'string' || value.length === 0) {
-        diags.push(diag('KL004', { params: { key, reason: hasIpa ? 'ipa' : 'respell' } }));
-        continue;
-      }
-      if (('stem' in e && typeof e.stem !== 'boolean') || ('verified' in e && typeof e.verified !== 'boolean') || ('note' in e && typeof e.note !== 'string')) {
-        diags.push(diag('KL004', { params: { key, reason: 'type' } }));
-        continue;
-      }
-      const aliases: string[] = [];
-      if ('aliases' in e) {
-        if (!Array.isArray(e.aliases)) {
-          diags.push(diag('KL004', { params: { key, reason: 'aliases' } }));
-          continue;
-        }
-        for (const a of e.aliases) {
-          if (typeof a === 'string' && isValidLexiconWord(a)) aliases.push(a);
-          else diags.push(diag('KL004', { params: { key, alias: String(a) } }));
-        }
-      }
-      const forms: [string, string][] = [];
-      if ('forms' in e) {
-        if (typeof e.forms !== 'object' || e.forms === null || Array.isArray(e.forms)) {
-          diags.push(diag('KL004', { params: { key, reason: 'forms' } }));
-          continue;
-        }
-        for (const [fk, fv] of Object.entries(e.forms as Record<string, unknown>)) {
-          if (isValidLexiconWord(fk) && typeof fv === 'string' && fv.length > 0) forms.push([fk, fv]);
-          else diags.push(diag('KL004', { params: { key, form: fk } }));
-        }
-      }
+      const shape = validateEntryTable(key, v, (code, params) => diags.push(diag(code, { params })));
+      if (!shape) continue;
       const entry = new LexiconEntry(lx, lx._core, key, {
-        kind: hasIpa ? 'ipa' : 'respell',
-        value,
-        stem: e.stem === true,
-        verified: e.verified === true,
-        ...(typeof e.note === 'string' && e.note !== '' ? { note: e.note } : {}),
-        aliases,
-        forms,
+        kind: shape.kind,
+        value: shape.value,
+        stem: shape.stem,
+        verified: shape.verified,
+        ...(shape.note !== undefined ? { note: shape.note } : {}),
+        aliases: shape.aliases,
+        forms: shape.forms,
       });
       lx.entries.items.push(entry);
     }
@@ -511,51 +467,15 @@ export class KokoLexicon implements Observable {
 }
 
 /** Linie bloku spłaszczonego leksykonu (Koko-Lexicon §3) — współdzielone z Koko-ASS. */
-export function flattenLines(effective: readonly EffectiveLexiconEntry[], episodeKeys: Iterable<string>): string[] {
+export function flattenLines(effective: readonly EffectiveLexiconEntry[], episodeWords: Iterable<string>): string[] {
   const ep = new Set<string>();
-  for (const k of episodeKeys) ep.add(foldCase(nfc(k).replace(/\*$/, '').trim()));
+  for (const k of episodeWords) ep.add(foldCase(nfc(k).replace(/\*$/, '').trim()));
   const kept = effective.filter((e) => {
     const words = [e.key, ...e.aliases, ...e.forms.map(([k]) => k)];
     return !words.some((w) => ep.has(foldCase(w)));
   });
   if (kept.length === 0) return [];
   const sorted = [...kept].sort((a, b) => compareCodePoints(a.key, b.key));
-  const lines = ['; @koko-lexicon-begin'];
-  for (const e of sorted) {
-    const val = (v: string) => (e.kind === 'ipa' ? v : `~${v}`);
-    if (e.note !== undefined || e.verified) {
-      let note = (e.note ?? '').replace(/\r\n|\r|\n/g, ' ').replace(/^@+/, '');
-      if (e.verified) note = note ? `${note} (sprawdzone)` : '(sprawdzone)';
-      lines.push(`; ${note}`.trimEnd());
-    }
-    const star = e.stem ? '*' : '';
-    lines.push(`${e.key}${star} = ${val(e.value)}`);
-    for (const a of e.aliases) lines.push(`${a}${star} = ${val(e.value)}`);
-    for (const [k, v] of [...e.forms].sort(([a], [b]) => compareCodePoints(a, b))) lines.push(`${k} = ${val(v)}`);
-  }
-  lines.push('; @koko-lexicon-end');
-  return lines;
+  // Jeden wpis = jedna linia (Koko-Lexicon §3): forma prosta albo pełna (tabela TOML w jednej linii).
+  return ['; @koko-lexicon-begin', ...sorted.map((e) => formatEntryLine(e.key, e)), '; @koko-lexicon-end'];
 }
-
-function tomlString(s: string): string {
-  let out = '"';
-  for (const ch of s) {
-    const cp = ch.codePointAt(0)!;
-    if (ch === '"') out += '\\"';
-    else if (ch === '\\') out += '\\\\';
-    else if (ch === '\n') out += '\\n';
-    else if (ch === '\r') out += '\\r';
-    else if (ch === '\t') out += '\\t';
-    else if (ch === '\b') out += '\\b';
-    else if (ch === '\f') out += '\\f';
-    else if (cp < 0x20 || cp === 0x7f) out += `\\u${cp.toString(16).padStart(4, '0')}`;
-    else out += ch;
-  }
-  return out + '"';
-}
-
-function tomlKey(k: string): string {
-  return /^[A-Za-z0-9_-]+$/.test(k) ? k : tomlString(k);
-}
-
-

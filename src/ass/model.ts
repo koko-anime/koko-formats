@@ -19,6 +19,8 @@ import {
 } from './kk.ts';
 import type { LineAnalysis } from './analysis.ts';
 import { LEKTOR_KEYS, RULES_KEYS, canonicalKeyName, type KeySpec } from './settings.ts';
+import { isValidLexiconWord, type EntryShape } from '../lexicon/entry.ts';
+import type { LexiconEntryData } from '../lexicon/lexicon.ts';
 
 /** Interfejs właściciela (KokoAss) widziany przez elementy modelu. */
 /** @internal */
@@ -801,15 +803,20 @@ export class EpisodeLexiconItem {
   readonly kind: 'entry' | 'comment';
   /** @internal */ _key: string;
   /** @internal */ _stem: boolean;
-  /** @internal */ _value: string;
+  /** @internal Wartość jak w formie prostej: IPA albo `~pisownia`. */ _value: string;
   /** @internal */ _text: string;
+  /** @internal */ _form: 'simple' | 'full' = 'simple';
+  /** @internal */ _aliases: string[] = [];
+  /** @internal */ _forms: [string, string][] = [];
+  /** @internal */ _note: string | undefined;
+  /** @internal */ _verified = false;
   /** @internal */ _flattened = false;
   /** @internal */ readonly atom: Atom;
   /** @internal */ readonly owner: AssOwner;
   /** @internal */ sourceLine?: number;
 
   /** @internal */
-  constructor(owner: AssOwner, kind: 'entry' | 'comment', d: { key?: string; stem?: boolean; value?: string; text?: string }) {
+  constructor(owner: AssOwner, kind: 'entry' | 'comment', d: { key?: string; stem?: boolean; value?: string; text?: string; full?: EntryShape }) {
     this.id = newId('kl');
     this.kind = kind;
     this.owner = owner;
@@ -817,8 +824,34 @@ export class EpisodeLexiconItem {
     this._stem = !!d.stem;
     this._value = d.value ?? '';
     this._text = d.text ?? '';
+    if (d.full) this._applyShape(d.full);
     this.atom = owner._atom('lexItem');
     markRaw(this);
+  }
+
+  /** @internal */
+  _applyShape(e: EntryShape): void {
+    this._form = 'full';
+    this._stem = e.stem;
+    this._value = e.kind === 'ipa' ? e.value : `~${e.value}`;
+    this._aliases = [...e.aliases];
+    this._forms = e.forms.map(([k, v]) => [k, v] as [string, string]);
+    this._note = e.note;
+    this._verified = e.verified;
+  }
+
+  /** @internal Wpis w modelu Koko-Lexicon (forma prosta = bez aliasów, form, notatki). */
+  _shape(): EntryShape {
+    const respell = this._value.startsWith('~');
+    return {
+      kind: respell ? 'respell' : 'ipa',
+      value: respell ? this._value.slice(1) : this._value,
+      stem: this._stem,
+      aliases: [...this._aliases],
+      forms: this._forms.map(([k, v]) => [k, v] as [string, string]),
+      note: this._note,
+      verified: this._verified,
+    };
   }
 
   #changed(path: string) {
@@ -828,10 +861,10 @@ export class EpisodeLexiconItem {
   /** Klucz bez `*`. */
   get key(): string { this.atom.track(); return this._key; }
   set key(v: string) { if (this._flattened) return; this._key = nfc(v).trim(); this.#changed('key'); }
-  /** Dopasowanie form odmienionych (`rdzeń*`). */
+  /** Dopasowanie form odmienionych (`rdzeń*` albo `stem = true`). */
   get stem(): boolean { this.atom.track(); return this._stem; }
   set stem(v: boolean) { if (this._flattened) return; this._stem = !!v; this.#changed('stem'); }
-  /** Wartość: IPA albo `~pisownia`. */
+  /** Wartość: IPA albo `~pisownia` (w formie pełnej — `ipa` albo `~` + `respell`). */
   get value(): string { this.atom.track(); return this._value; }
   set value(v: string) { if (this._flattened) return; this._value = nfc(v).trim(); this.#changed('value'); }
   /** Treść komentarza (bez `;`). */
@@ -841,6 +874,73 @@ export class EpisodeLexiconItem {
   get flattened(): boolean { this.atom.track(); return this._flattened; }
   /** `respell` dla wartości z `~`, inaczej `ipa`. */
   get valueKind(): 'ipa' | 'respell' { return this.value.startsWith('~') ? 'respell' : 'ipa'; }
+  /** Forma zapisu wpisu (Koko-ASS §2): `simple` (`słowo = wartość`) albo `full` (tabela TOML w jednej linii). */
+  get form(): 'simple' | 'full' { this.atom.track(); return this._form; }
+  /** Aliasy (forma pełna). */
+  get aliases(): readonly string[] { this.atom.track(); return Object.freeze([...this._aliases]); }
+  /** Formy z pełną wymową (forma pełna). */
+  get forms(): Readonly<Record<string, string>> { this.atom.track(); return Object.freeze(Object.fromEntries(this._forms)); }
+  /** Notatka (bez wpływu na dźwięk). */
+  get note(): string | undefined { this.atom.track(); return this._note; }
+  /** Sprawdzone na słuch (bez wpływu na dźwięk). */
+  get verified(): boolean { this.atom.track(); return this._verified; }
+
+  /** Wpis w modelu Koko-Lexicon (`ipa`/`respell`, `stem`, `aliases`, `forms`, `note`, `verified`). */
+  toEntry(): LexiconEntryData {
+    const e = this._shape();
+    const o: LexiconEntryData = e.kind === 'ipa' ? { ipa: e.value } : { respell: e.value };
+    if (e.stem) o.stem = true;
+    if (e.aliases.length) o.aliases = e.aliases;
+    if (e.forms.length) o.forms = Object.fromEntries(e.forms);
+    if (e.note !== undefined) o.note = e.note;
+    if (e.verified) o.verified = true;
+    return o;
+  }
+
+  /**
+   * Ustawia cały wpis (Koko-Lexicon §1). Aliasy, formy, notatka albo `verified` przepisują wpis na formę pełną;
+   * forma pełna nie wraca do prostej (Koko-ASS §2). Niepoprawne dane (KL004) → `KokoErrors`.
+   */
+  setEntry(data: LexiconEntryData): void | KokoErrors {
+    if (this._flattened || this.kind !== 'entry') return;
+    const errors = entryDataErrors(this._key, data);
+    if (errors) return errors;
+    const shape = shapeOf(data);
+    const full = this._form === 'full' || !isSimpleShape(shape);
+    if (full) this._applyShape(shape);
+    else {
+      this._stem = shape.stem;
+      this._value = shape.kind === 'ipa' ? shape.value : `~${shape.value}`;
+    }
+    this.#changed('entry');
+  }
+}
+
+function isSimpleShape(e: EntryShape): boolean {
+  return e.aliases.length === 0 && e.forms.length === 0 && e.note === undefined && !e.verified;
+}
+
+function shapeOf(d: LexiconEntryData): EntryShape {
+  const ipa = typeof d.ipa === 'string';
+  return {
+    kind: ipa ? 'ipa' : 'respell',
+    value: nfc((ipa ? d.ipa : d.respell)!.trim()),
+    stem: !!d.stem,
+    aliases: (d.aliases ?? []).map((a) => nfc(a)),
+    forms: Object.entries(d.forms ?? {}).map(([k, v]) => [nfc(k), nfc(v)] as [string, string]),
+    note: d.note ? nfc(d.note) : undefined,
+    verified: !!d.verified,
+  };
+}
+
+function entryDataErrors(key: string, d: LexiconEntryData): KokoErrors | undefined {
+  const errs = [];
+  if ((typeof d.ipa === 'string') === (typeof d.respell === 'string')) errs.push(diag('KL004', { level: 'error', params: { key, reason: 'ipa/respell' } }));
+  const v = d.ipa ?? d.respell;
+  if (typeof v === 'string' && (!v.trim() || v.startsWith('~') || v.trim().startsWith('{'))) errs.push(diag('KL004', { level: 'error', params: { key, reason: 'value' } }));
+  for (const w of [...(d.aliases ?? []), ...Object.keys(d.forms ?? {})]) if (!isValidLexiconWord(w)) errs.push(diag('KL004', { level: 'error', params: { key, word: w } }));
+  for (const fv of Object.values(d.forms ?? {})) if (!fv || fv.startsWith('~')) errs.push(diag('KL004', { level: 'error', params: { key, reason: 'form' } }));
+  return errs.length ? new KokoErrors(errs) : undefined;
 }
 
 /** Sekcja `[Koko Lexicon]` (leksykon odcinka, łącznie z blokiem spłaszczonego leksykonu serii). */
@@ -850,9 +950,24 @@ export class EpisodeLexicon extends ItemCollection<EpisodeLexiconItem> {
     super({ atom: (n?: string) => owner._atom(n ?? 'kokoLexicon') } as never, 'kokoLexicon');
     this.owner = owner;
   }
-  /** Dodaje wpis przed blokiem spłaszczonego leksykonu serii. */
-  add(key: string, value: string, opts: { stem?: boolean } = {}): EpisodeLexiconItem {
-    const it = new EpisodeLexiconItem(this.owner, 'entry', { key: nfc(key).replace(/\*$/, '').trim(), stem: opts.stem ?? key.trim().endsWith('*'), value: nfc(value).trim() });
+  /**
+   * Dodaje wpis przed blokiem spłaszczonego leksykonu serii: `add('Jinshi*', 'dʑinɕi')` (forma prosta)
+   * albo `add('Jinshi', { ipa: 'dʑinɕi', aliases: ['Jinshi-sama'] })` (forma pełna, gdy są aliasy, formy, notatka lub `verified`).
+   */
+  add(key: string, value: string | LexiconEntryData, opts: { stem?: boolean } = {}): EpisodeLexiconItem | KokoErrors {
+    const k = nfc(key).replace(/\*$/, '').trim();
+    if (!isValidLexiconWord(k)) return new KokoErrors([diag('KL004', { level: 'error', params: { key: k, reason: 'key' } })]);
+    let it: EpisodeLexiconItem;
+    if (typeof value === 'string') {
+      it = new EpisodeLexiconItem(this.owner, 'entry', { key: k, stem: opts.stem ?? key.trim().endsWith('*'), value: nfc(value).trim() });
+    } else {
+      const err = entryDataErrors(k, value);
+      if (err) return err;
+      const shape = shapeOf(value);
+      it = isSimpleShape(shape)
+        ? new EpisodeLexiconItem(this.owner, 'entry', { key: k, stem: shape.stem, value: shape.kind === 'ipa' ? shape.value : `~${shape.value}` })
+        : new EpisodeLexiconItem(this.owner, 'entry', { key: k, full: shape });
+    }
     const firstFlat = this.items.findIndex((x) => x._flattened);
     this.items.splice(firstFlat < 0 ? this.items.length : firstFlat, 0, it);
     this.owner._globalChanged([this.atom], it.id, ['koko', 'lexicon', it.id], 'insert');

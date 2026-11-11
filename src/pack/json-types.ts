@@ -84,6 +84,14 @@ export interface ManifestSubtitlesJson {
 }
 
 /** Wpis osi czasu w manifeście. */
+export interface FontEntryJson {
+  /** Ścieżka `fonts/<plik>`. */
+  path: string;
+  /** Hash pliku. */
+  sha256: string;
+}
+
+/** Wpis `manifest.timeline`. */
 export interface ManifestTimelineJson {
   /** Zawsze `timeline.json`. */
   path: string;
@@ -113,6 +121,8 @@ export interface ManifestJson {
   audio: AudioEntryJson[];
   /** Oś czasu. */
   timeline: ManifestTimelineJson;
+  /** Czcionki z `fonts/` (Koko-Pack §3.1), w porządku Unicode `path`. */
+  fonts?: FontEntryJson[];
   /** Tożsamość syntezy. */
   synthesis?: SynthesisJson;
   /** Wideo. */

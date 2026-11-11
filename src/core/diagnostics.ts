@@ -108,6 +108,8 @@ export const CATALOG: Readonly<Record<string, CatalogEntry>> = {
   KP017: { level: 'error', title: 'Klucz unieważniony w rejestrze', hint: 'Paczka otwarta jako niezaufana.' },
   KP018: { level: 'error', title: 'Klucz nie należy do konta (możliwe podszycie)', hint: 'Paczka otwarta jako niezaufana.' },
   KP019: { level: 'info', title: 'Rejestr nieosiągalny', hint: 'Podpis niezweryfikowany.' },
+  KP020: { level: 'warning', title: 'Czcionka nieczytelna, niezgodna z manifestem lub ponad limit', hint: 'Czcionka pominięta; renderer użyje zastępczej.' },
+  KP021: { level: 'info', title: 'Krój użyty w napisach nie jest w fonts/', hint: 'Dołącz plik czcionki (setFont), inaczej wygląd zależy od czcionek widza.' },
   KP101: { level: 'info', title: 'Wypowiedzi nowe lub do przeliczenia', hint: 'Zostaną zsyntezowane.' },
   KP102: { level: 'info', title: 'Wypowiedzi przesunięte', hint: 'Klipy zostaną przeniesione bez syntezy.' },
   KP103: { level: 'warning', title: 'Wpisy osierocone', hint: 'Fragmenty zostaną wyciszone.' },

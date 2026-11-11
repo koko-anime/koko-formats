@@ -17,6 +17,8 @@
  * @module @koko-anime/formats/pack
  */
 export { KokoPack, AudioTrack, ManifestView, TimelineView, videoFingerprint, MIMETYPE, KOKO_PACK_VERSION } from './koko-pack.ts';
+export { readFontNames, isFontFileName, FONT_EXTENSIONS } from './fonts.ts';
+export type { FontNames } from './fonts.ts';
 export type {
   PackOpenOptions,
   PackProfile,

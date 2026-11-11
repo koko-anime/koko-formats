@@ -22,8 +22,8 @@ afterEach(() => resetConfig());
 describe('A1 — wersja API', () => {
   test('wersje', () => {
     expect(PLUGIN_API_VERSION).toBe('0.4');
-    expect(SPEC_VERSION).toBe('0.4.0');
-    expect(kokoFormats.specVersion).toBe('0.4.0');
+    expect(SPEC_VERSION).toBe('0.5.0');
+    expect(kokoFormats.specVersion).toBe('0.5.0');
   });
 
   test('brak api → KF007 warning, plugin działa; zła wersja → KF007 error, plugin pominięty', async () => {

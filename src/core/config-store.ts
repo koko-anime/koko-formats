@@ -31,6 +31,12 @@ export interface KokoLimits {
   timelineMaxBytes?: number;
   /** Maksymalny rozmiar pliku w `cache/` (domyślnie 512 MiB). */
   cacheMaxBytes?: number;
+  /** Maksymalna liczba czcionek w `fonts/` (domyślnie 100, Koko-Pack §8). */
+  fontsMaxCount?: number;
+  /** Maksymalny rozmiar jednej czcionki (domyślnie 50 MiB). */
+  fontMaxBytes?: number;
+  /** Maksymalny łączny rozmiar czcionek (domyślnie 200 MiB). */
+  fontsMaxTotalBytes?: number;
 }
 
 /** Ustawienie reguły pluginu: `off`, `on` (poziom z reguły) albo wymuszony poziom. */
@@ -428,6 +434,9 @@ const DEFAULT_LIMITS: Required<KokoLimits> = {
   maxCompressionRatio: 100,
   timelineMaxBytes: 64 * 1024 * 1024,
   cacheMaxBytes: 512 * 1024 * 1024,
+  fontsMaxCount: 100,
+  fontMaxBytes: 50 * 1024 * 1024,
+  fontsMaxTotalBytes: 200 * 1024 * 1024,
 };
 
 const LIST_ID: { [K in ListCapabilityName]: (x: ListCapabilities[K]) => string } = {

@@ -4,7 +4,7 @@ Biblioteka TypeScript do odczytu, edycji i zapisu formatów projektu **Koko-Anim
 **Koko-ASS v1** (napisy z instrukcjami dla lektora), **Koko-Lexicon v1** (leksykon serii)
 i **Koko-Pack v1** (paczka napisów i ścieżki lektora).
 
-Wersja pakietu **0.4.0** — implementuje specyfikację API **0.4.0** (`Koko-Formats-API_v0`), w tym API pluginów 0.4.
+Wersja pakietu **0.5.0** — implementuje specyfikację API **0.5.0** (`Koko-Formats-API_v0`), API pluginów 0.4 oraz formaty w stanie z 11.11.2026: forma pełna wpisu w `[Koko Lexicon]`, spłaszczanie „jeden wpis = jedna linia” i czcionki w paczce (`fonts/`).
 
 > Wersja 0.2.0 na npm to wcześniejsza implementacja z innym API (`/koko-ass`, `/koko-pack`, `/koko-lexicon`), dlatego ta biblioteka startuje od 0.3.0.
 
@@ -71,6 +71,20 @@ const forViewers = await pack.toBlob({ profile: 'distribution' });
 {/each}
 ```
 
+## Leksykon i czcionki (0.5)
+
+```ts
+// [Koko Lexicon] odcinka: forma prosta albo pełna (tabela TOML w jednej linii, Koko-ASS §2)
+ass.koko.lexicon.add('Jinshi', { ipa: 'dʑinɕi', stem: true, aliases: ['Jinshi-sama'], forms: { Jinshiego: 'dʑinˈɕiɛɡɔ' } });
+// → Jinshi = { ipa = "dʑinɕi", stem = true, forms = { Jinshiego = "dʑinˈɕiɛɡɔ" }, aliases = ["Jinshi-sama"] }
+ass.flattenSeriesLexicon();             // blok w znacznikach, jeden wpis = jedna linia (Koko-Lexicon §3)
+const series = ass.extractSeriesLexicon(); // odtworzenie koko-lexicon.toml z bloku (§3.1)
+
+// Czcionki paczki (Koko-Pack §3.1)
+await pack.setFont('Gandhi Sans Bold.ttf', fontBlob); // KP007 zła nazwa, KP020 nie-czcionka
+pack.checkFonts();                                  // KP021: kroje z napisów bez pliku w fonts/
+```
+
 ## Pluginy
 
 Plugin to `definePlugin({ name, api: '0.4', ...capability })`. Plugin bez `api` działa jak 0.3 (ostrzeżenie KF007), z inną wersją jest pomijany (KF007).
@@ -134,6 +148,8 @@ Miejsca, w których specyfikacja zostawiała swobodę albo w których implementa
 12. **Normalizatory pluginów** zmieniają segmenty kanoniczne, a więc klucze wypowiedzi; wersje etapów nie wchodzą do klucza (Dodatek A, pytanie 1). Etapy `opt-in` włącza konfiguracja aplikacji, nie plik `.ass` (czeka na zmianę Koko-ASS). Ten sam wynik w TS i Rust jest gwarantowany tylko bez normalizatorów pluginów.
 13. **Język normalizacji** = `pl` (Koko-ASS v1 nie ma klucza języka).
 14. **Cache syntezy** jest adresowany `<utteranceKey>@<speed>`, bo dopasowanie (ASS §4.6) syntezuje tę samą wypowiedź z różnymi prędkościami.
+15. **Czcionki:** dopasowanie `Fontname`/`\fn` do plików po nazwach z tabeli `name` (rodzina, pełna, PostScript), bez rozróżniania wielkości liter, z pominięciem wiodącego `@`. Przenoszenie czcionek z sekcji `[Fonts]` pliku `.ass` do `fonts/` nie jest jeszcze zaimplementowane.
+16. **Forma pełna w `.ass`:** `setEntry()` przepisuje wpis prosty na pełny, gdy pojawiają się aliasy, formy, notatka albo `verified`; pełny nigdy nie wraca do prostego (Koko-ASS §2).
 
 ## Ograniczenia
 

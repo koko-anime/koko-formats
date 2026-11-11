@@ -23,16 +23,11 @@ respell = "konkubina Dżin"
 forms = { "Konkubiny Jin" = "konkubiny Dżin" }
 `;
 
+// Przykład z Koko-Lexicon §3 (jeden wpis = jedna linia).
 const EXPECTED_FLAT = `; @koko-lexicon-begin
-Gyokuyou* = ~Giokujo
-Gyokuyouji = ~Giokujoji
-; eunuch nadzorujący pałac wewnętrzny (sprawdzone)
-Jinshi* = dʑinɕi
-Jinshi-sama* = dʑinɕi
-Jinshiego = dʑinˈɕiɛɡɔ
-Jinshiemu = dʑinˈɕiɛmu
-Konkubina Jin = ~konkubina Dżin
-Konkubiny Jin = ~konkubiny Dżin
+Gyokuyou = { respell = "Giokujo", stem = true, forms = { Gyokuyouji = "Giokujoji" } }
+Jinshi = { ipa = "dʑinɕi", stem = true, forms = { Jinshiego = "dʑinˈɕiɛɡɔ", Jinshiemu = "dʑinˈɕiɛmu" }, aliases = ["Jinshi-sama"], note = "eunuch nadzorujący pałac wewnętrzny", verified = true }
+Konkubina Jin = { respell = "konkubina Dżin", forms = { "Konkubiny Jin" = "konkubiny Dżin" } }
 ; @koko-lexicon-end`;
 
 describe('Koko-Lexicon', () => {
@@ -45,7 +40,7 @@ describe('Koko-Lexicon', () => {
   test('wpisy przegrywające z odcinkiem są pomijane', () => {
     const lx = KokoLexicon.parse(SRC) as KokoLexicon;
     expect(lx.flatten({ episodeKeys: ['Jinshi', 'Gyokuyou*'] })).toBe(
-      '; @koko-lexicon-begin\nKonkubina Jin = ~konkubina Dżin\nKonkubiny Jin = ~konkubiny Dżin\n; @koko-lexicon-end',
+      '; @koko-lexicon-begin\nKonkubina Jin = { respell = "konkubina Dżin", forms = { "Konkubiny Jin" = "konkubiny Dżin" } }\n; @koko-lexicon-end',
     );
   });
 
